@@ -1,0 +1,45 @@
+{
+  "name": "observable-universe",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "test": "vitest run src",
+    "test:e2e": "playwright test",
+    "sync:catalog": "node scripts/sync-catalog.mjs",
+    "lint": "eslint src scripts tests vite.config.ts playwright.config.ts --max-warnings 0",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.2.5",
+    "@fontsource/manrope": "^5.2.8",
+    "@fontsource/space-grotesk": "^5.2.10",
+    "astronomia": "^4.2.0",
+    "astronomy-engine": "^2.1.19",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.1",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@types/three": "^0.180.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "csv-parse": "^7.0.2",
+    "eslint": "9.39.1",
+    "eslint-plugin-react-hooks": "7.0.1",
+    "eslint-plugin-react-refresh": "0.4.24",
+    "globals": "16.4.0",
+    "prettier": "^3.9.7",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "8.46.1",
+    "vite": "^6.4.1",
+    "vitest": "^4.1.11"
+  }
+}

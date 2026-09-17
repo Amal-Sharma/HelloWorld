@@ -1,0 +1,9 @@
+{
+  "retrievedAt": "2026-09-16T17:21:34.742Z",
+  "exoplanets": 6366,
+  "comets": 4076,
+  "minorPlanets": 5004,
+  "stars": 119625,
+  "starsWithDistances": 109400,
+  "scope": "All rows in the NASA PSCompPars and JPL comet responses; HYG v4.1 stars; 5,000 minor planets ranked by diameter plus explicit dwarf-planet records. Not a complete inventory of the Milky Way."
+}

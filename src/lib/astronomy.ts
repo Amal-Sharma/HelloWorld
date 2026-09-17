@@ -1,9 +1,11 @@
 import {
   GeoMoon,
   HelioVector,
+  JupiterMoons,
   MakeTime,
   RotateVector,
   Rotation_EQJ_ECL,
+  Vector,
 } from 'astronomy-engine'
 import {
   kepler3,
@@ -17,6 +19,10 @@ export type Position = [number, number, number]
 export const DAY_MS = 86_400_000
 export const MIN_DATE = Date.UTC(1900, 0, 1)
 export const MAX_DATE = Date.UTC(2100, 11, 31, 23, 59, 59)
+let jovianCache: {
+  timestamp: number
+  moons: ReturnType<typeof JupiterMoons>
+} | null = null
 
 export function clampTime(timestamp: number): number {
   return Number.isFinite(timestamp)
@@ -26,6 +32,16 @@ export function clampTime(timestamp: number): number {
 
 export function getPosition(object: CelestialObject, date: Date): Position {
   if (object.elements) return smallBodyPosition(object.elements, date)
+  if (object.jovianMoon) {
+    if (jovianCache?.timestamp !== date.getTime())
+      jovianCache = { timestamp: date.getTime(), moons: JupiterMoons(date) }
+    const state = jovianCache.moons[object.jovianMoon]
+    const ecliptic = RotateVector(
+      Rotation_EQJ_ECL(),
+      new Vector(state.x, state.y, state.z, state.t),
+    )
+    return [ecliptic.x, ecliptic.z, -ecliptic.y]
+  }
   if (!object.body && object.id !== 'moon') return [0, 0, 0]
   const vector =
     object.id === 'moon' ? GeoMoon(date) : HelioVector(object.body!, date)
@@ -66,7 +82,10 @@ export function sampleOrbit(
       return orientOrbit(elements, anomaly, radius)
     })
   }
-  if (!object.orbit.periodDays || (!object.body && object.id !== 'moon'))
+  if (
+    !object.orbit.periodDays ||
+    (!object.body && !object.jovianMoon && object.id !== 'moon')
+  )
     return []
   return Array.from({ length: segments + 1 }, (_, index) =>
     getPosition(

@@ -228,11 +228,13 @@
 }
 .brand > svg {
   color: var(--accent);
+  flex-shrink: 0;
 }
 .brand > span {
   font-family: var(--display);
   font-weight: 500;
   font-size: 24px;
+  white-space: nowrap;
 }
 .brand-period {
   color: var(--accent);
@@ -799,6 +801,21 @@
   display: flex;
   align-items: center;
   gap: 7px;
+}
+.follow-control {
+  max-width: 108px;
+}
+@media (max-width: 379px) {
+  .view-layers {
+    gap: 4px !important;
+  }
+  .view-layers > .follow-control {
+    padding-left: 7px;
+    padding-right: 7px;
+  }
+  .follow-control > span:not(.mini-toggle) {
+    display: none;
+  }
 }
 .view-layers > button {
   display: flex;
@@ -1807,7 +1824,7 @@
     width: 24px;
   }
   .brand > span {
-    font-size: 21px;
+    font-size: 18px;
   }
   .mobile-menu {
     display: flex;
@@ -1919,9 +1936,6 @@
   .viewer-tools .icon-button {
     width: 29px;
     height: 28px;
-  }
-  .viewer-tools .icon-button:last-child {
-    display: none;
   }
   .scene-coordinate {
     display: none;

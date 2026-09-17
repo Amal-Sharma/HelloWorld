@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
-import { Vector3 } from 'three'
+import { PerspectiveCamera, Vector2, Vector3 } from 'three'
 import { ContinuousMap } from '../components/ContinuousMap'
 import {
   extendedData,
@@ -41,17 +41,103 @@ import {
 const date = new Date('2026-09-16T12:00:00Z')
 
 describe('continuous map coordinates', () => {
+  it('keeps a followed distant quasar separated from the camera at extreme zoom', () => {
+    const position = new Vector3(-6.2e8, 5.4e9, -1.0e8)
+    const quasar = { id: 'quasar', position, radius: 0.004, kind: 'quasar' }
+    const camera = new PerspectiveCamera()
+    camera.position.set(0, 0, 1)
+    const map: ContinuousMap = Object.assign(
+      Object.create(ContinuousMap.prototype),
+      {
+        camera,
+        controls: { target: new Vector3() },
+        origin: position.clone(),
+        unit: 1,
+        worldCamera: new Vector3(),
+        worldTarget: new Vector3(),
+        following: quasar,
+        followLocked: true,
+        host: { querySelector: () => ({ dataset: {} }) },
+      },
+    )
+    map.zoom(1e-14)
+    const flight = Object.getOwnPropertyDescriptor(map, 'flight')!.value as {
+      camera: Vector3
+      target: Vector3
+    }
+    expect(flight.camera.distanceTo(flight.target)).toBeGreaterThan(
+      quasar.radius,
+    )
+    expect(flight.camera.toArray().every(Number.isFinite)).toBe(true)
+    expect(flight.target.distanceTo(position)).toBe(0)
+  })
+  it('keeps a selected planet centered even when zooming over another body', () => {
+    const camera = new PerspectiveCamera()
+    camera.position.set(1, 0, 0.2)
+    const planet = {
+      id: 'earth',
+      position: new Vector3(1, 0, 0),
+      radius: 0.02,
+      kind: 'planet',
+      solar: earth,
+    }
+    const sun = {
+      id: 'sun',
+      position: new Vector3(),
+      radius: 0.05,
+      kind: 'star',
+    }
+    const surface = { dataset: {} }
+    const map: ContinuousMap = Object.assign(
+      Object.create(ContinuousMap.prototype),
+      {
+        camera,
+        controls: { target: planet.position.clone() },
+        worldCamera: new Vector3(),
+        worldTarget: new Vector3(),
+        origin: new Vector3(),
+        unit: 1,
+        velocity: new Vector3(),
+        previousFollowPosition: new Vector3(),
+        index: new Map([
+          ['earth', planet],
+          ['sun', sun],
+        ]),
+        options: { catalogRevision: 1 },
+        host: { querySelector: () => surface },
+      },
+    )
+    map.flyTo('earth', true)
+    for (const factor of [0.5, 2, 0.75]) {
+      map.zoom(factor, new Vector2(0, 0), 'sun')
+      const flight = Object.getOwnPropertyDescriptor(map, 'flight')!.value as {
+        camera: Vector3
+        target: Vector3
+      }
+      expect(flight.target.distanceTo(planet.position)).toBeLessThan(1e-12)
+      expect(flight.camera.toArray().every(Number.isFinite)).toBe(true)
+    }
+  })
   it('replaces an in-flight absolute zoom instead of multiplying it', () => {
     const surface = { dataset: {} }
-    const map: ContinuousMap = Object.assign(Object.create(ContinuousMap.prototype), {
-      camera: { position: new Vector3(0, 0, 4) },
-      controls: { target: new Vector3() },
-      worldCamera: new Vector3(), worldTarget: new Vector3(), origin: new Vector3(), unit: 1,
-      flight: { camera: new Vector3(0, 0, 1000), target: new Vector3() },
-      host: { querySelector: () => surface },
-    })
+    const map: ContinuousMap = Object.assign(
+      Object.create(ContinuousMap.prototype),
+      {
+        camera: { position: new Vector3(0, 0, 4) },
+        controls: { target: new Vector3() },
+        worldCamera: new Vector3(),
+        worldTarget: new Vector3(),
+        origin: new Vector3(),
+        unit: 1,
+        flight: { camera: new Vector3(0, 0, 1000), target: new Vector3() },
+        host: { querySelector: () => surface },
+      },
+    )
     map.setScale(10)
-    const flight = Object.getOwnPropertyDescriptor(map, 'flight')!.value as { camera: Vector3; target: Vector3 }
+    const flight = Object.getOwnPropertyDescriptor(map, 'flight')!.value as {
+      camera: Vector3
+      target: Vector3
+    }
     expect(flight.camera.distanceTo(flight.target)).toBeCloseTo(10, 12)
     for (const invalid of [NaN, Infinity, -1, 0]) {
       map.setScale(invalid)
@@ -103,6 +189,38 @@ beforeAll(async () => {
 })
 
 describe('astronomy model', () => {
+  it('places all Galilean moons around Jupiter in the shared world frame', () => {
+    const jupiter = objectById.get('jupiter')!
+    const primary = solarPositionPc(jupiter, date)
+    for (const id of ['io', 'europa', 'ganymede', 'callisto']) {
+      const moon = objectById.get(id)!
+      const local = getPosition(moon, date)
+      const world = solarPositionPc(moon, date)
+      expect(
+        Math.hypot(
+          ...world.map((coordinate, index) => coordinate - primary[index]),
+        ) * AU_PER_PARSEC,
+      ).toBeCloseTo(distanceAu(local), 9)
+      expect(distanceAu(local) / moon.orbit.semiMajorAxis!).toBeGreaterThan(
+        0.96,
+      )
+      expect(distanceAu(local) / moon.orbit.semiMajorAxis!).toBeLessThan(1.04)
+      expect(sampleOrbit(moon, date, 60)).toHaveLength(61)
+      expect(getAncestry(id).at(-2)?.id).toBe('jupiter')
+    }
+  })
+  it('includes additional deep-sky destinations with finite reference coordinates', () => {
+    const mapped = catalog.filter((object) => object.skyPosition)
+    expect(mapped.length).toBeGreaterThanOrEqual(20)
+    expect(mapped.some((object) => object.kind === 'star-cluster')).toBe(true)
+    for (const object of mapped) {
+      expect(Object.values(object.skyPosition!).every(Number.isFinite)).toBe(
+        true,
+      )
+      expect(object.skyPosition!.distancePc).toBeGreaterThan(0)
+      expect(object.skyPosition!.radiusPc).toBeGreaterThan(0)
+    }
+  })
   it('places Earth approximately one AU from the Sun', () => {
     expect(distanceAu(getPosition(earth, date))).toBeGreaterThan(0.98)
     expect(distanceAu(getPosition(earth, date))).toBeLessThan(1.02)

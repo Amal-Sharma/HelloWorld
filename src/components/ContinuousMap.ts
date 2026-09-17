@@ -36,6 +36,7 @@ export interface MapTelemetry {
   nearest: string
   mapped: number
   focusedId?: string
+  followingId?: string
 }
 
 interface Entry {
@@ -124,7 +125,7 @@ export class ContinuousMap {
   private paths: {
     line: THREE.Line
     positions: THREE.Vector3[]
-    moon: boolean
+    parentId?: string
   }[] = []
   private options: MapOptions
   private revision = -1
@@ -140,6 +141,7 @@ export class ContinuousMap {
   private frame = 0
   private nearest: Entry | null = null
   private following: Entry | null = null
+  private followLocked = false
   private previousFollowPosition = new THREE.Vector3()
   private labelCandidates: {
     entry: Entry
@@ -238,7 +240,7 @@ export class ContinuousMap {
         color: object.color,
         position: new THREE.Vector3(),
       }
-      if (object.body || object.id === 'moon')
+      if (object.body || object.id === 'moon' || object.jovianMoon)
         this.add({
           ...base,
           position: new THREE.Vector3(...solarPositionPc(object, date)),
@@ -285,7 +287,26 @@ export class ContinuousMap {
           aggregate: true,
           approximate: true,
         })
-      else if (locations[object.id]) {
+      else if (object.skyPosition) {
+        const {
+          rightAscensionHours,
+          declinationDegrees,
+          distancePc,
+          radiusPc,
+        } = object.skyPosition
+        this.add({
+          ...base,
+          position: new THREE.Vector3(
+            ...skyPositionPc(
+              rightAscensionHours,
+              declinationDegrees,
+              distancePc,
+            ),
+          ),
+          radius: radiusPc,
+          approximate: true,
+        })
+      } else if (locations[object.id]) {
         const [ascension, declination, distance, radius] = locations[object.id]
         this.add({
           ...base,
@@ -393,7 +414,10 @@ export class ContinuousMap {
   }
 
   private createPaths() {
-    for (const object of [...solarPlanets, objectById.get('moon')!]) {
+    for (const object of [
+      ...solarPlanets,
+      ...catalog.filter((item) => item.kind === 'moon'),
+    ]) {
       const positions = sampleOrbit(object, new Date(this.timestamp), 220).map(
         (point) => new THREE.Vector3(...eclipticToWorld(point)),
       )
@@ -416,7 +440,11 @@ export class ContinuousMap {
       )
       line.frustumCulled = false
       this.root.add(line)
-      this.paths.push({ line, positions, moon: object.id === 'moon' })
+      this.paths.push({
+        line,
+        positions,
+        parentId: object.kind === 'moon' ? object.parent : undefined,
+      })
     }
   }
 
@@ -431,8 +459,24 @@ export class ContinuousMap {
       .add(this.origin)
   }
 
+  private minimumCameraDistance(target: THREE.Vector3) {
+    return Math.max(
+      5e-13,
+      Math.max(Math.abs(target.x), Math.abs(target.y), Math.abs(target.z)) *
+        Number.EPSILON *
+        32,
+    )
+  }
+
   private setWorldCamera(camera: THREE.Vector3, target: THREE.Vector3) {
-    const distance = Math.max(1e-13, camera.distanceTo(target))
+    const minimum = this.minimumCameraDistance(target)
+    if (camera.distanceTo(target) < minimum) {
+      const direction = camera.clone().sub(target)
+      if (direction.lengthSq() === 0)
+        direction.set(0, 0, 1).applyQuaternion(this.camera.quaternion)
+      camera.copy(target).add(direction.setLength(minimum))
+    }
+    const distance = camera.distanceTo(target)
     const nextUnit = renderUnitPc(distance)
     if (nextUnit !== this.unit || this.controls.target.length() > 200) {
       this.origin.copy(target)
@@ -459,14 +503,44 @@ export class ContinuousMap {
   stopMovement() {
     this.velocity.set(0, 0, 0)
   }
-  interrupt() {
+  interrupt(preserveFollow = false) {
     this.pendingFocus = null
     this.flight = null
-    this.following = null
+    if (!preserveFollow) {
+      this.following = null
+      this.followLocked = false
+    }
     this.zooming = false
     this.zoomAnchor = null
     this.zoomPointer = null
     this.host.querySelector('canvas')!.dataset.flying = 'false'
+  }
+  setFollow(id: string | null) {
+    if (id === null) {
+      this.interrupt()
+      return
+    }
+    const entry = this.index.get(id)
+    if (!entry || entry.aggregate || entry.positionValid === false) {
+      this.host.dispatchEvent(
+        new CustomEvent('map-notice', {
+          detail: 'This body has no available position to follow.',
+        }),
+      )
+      return
+    }
+    this.readCamera()
+    const offset = this.worldCamera.clone().sub(this.worldTarget)
+    this.followLocked = true
+    this.following = entry
+    this.previousFollowPosition.copy(entry.position)
+    this.velocity.set(0, 0, 0)
+    this.zooming = false
+    this.flight = {
+      camera: entry.position.clone().add(offset),
+      target: entry.position.clone(),
+    }
+    this.host.querySelector('canvas')!.dataset.flying = 'true'
   }
   select(id: string) {
     this.selected = id
@@ -493,18 +567,21 @@ export class ContinuousMap {
     }
     this.selected = id
     this.velocity.set(0, 0, 0)
-    this.following = entry.solar || entry.elements ? entry : null
+    this.followLocked = !entry.aggregate
+    this.following = this.followLocked ? entry : null
     this.previousFollowPosition.copy(entry.position)
     this.readCamera()
-    const distance =
+    const distance = Math.max(
+      this.minimumCameraDistance(entry.position),
       entry.radius *
-      (entry.kind === 'black-hole' || entry.kind === 'quasar'
-        ? 42
-        : entry.kind === 'galaxy'
-          ? 4.8
-          : entry.id === 'saturn'
-            ? 10
-            : 5)
+        (entry.kind === 'black-hole' || entry.kind === 'quasar'
+          ? 42
+          : entry.kind === 'galaxy'
+            ? 4.8
+            : entry.id === 'saturn'
+              ? 10
+              : 5),
+    )
     const direction = this.worldCamera.clone().sub(this.worldTarget).normalize()
     if (direction.lengthSq() === 0) direction.set(0.1, 0.6, 1).normalize()
     const target = entry.position.clone()
@@ -522,7 +599,10 @@ export class ContinuousMap {
   setScale(distancePc: number) {
     if (!Number.isFinite(distancePc) || distancePc <= 0) return
     this.readCamera()
-    const reference = this.flight ?? { camera: this.worldCamera, target: this.worldTarget }
+    const reference = this.flight ?? {
+      camera: this.worldCamera,
+      target: this.worldTarget,
+    }
     this.zoom(
       distancePc /
         Math.max(1e-15, reference.camera.distanceTo(reference.target)),
@@ -535,30 +615,31 @@ export class ContinuousMap {
     this.readCamera()
     const camera = this.flight?.camera.clone() ?? this.worldCamera.clone()
     const target = this.flight?.target.clone() ?? this.worldTarget.clone()
+    const locked =
+      this.followLocked && this.following?.positionValid !== false
+        ? this.following
+        : null
+    if (locked) {
+      camera.add(locked.position.clone().sub(target))
+      target.copy(locked.position)
+    }
     const stationary =
       pointer &&
       this.zoomPointer &&
       pointer.distanceTo(this.zoomPointer) < 0.015
     const aimed =
-      factor < 1 && pointer
+      locked ??
+      (factor < 1 && pointer
         ? stationary && this.zoomAnchor
           ? this.zoomAnchor
           : anchorId
             ? this.index.get(anchorId)
             : this.aimedEntry(pointer, true)
-        : null
+        : null)
     this.zoomAnchor = aimed ?? null
     this.zoomPointer = pointer?.clone() ?? null
     const anchor = aimed?.position ?? target
     const distance = camera.distanceTo(target)
-    const clamped =
-      THREE.MathUtils.clamp(
-        distance * factor,
-        5e-13,
-        OBSERVABLE_RADIUS_PC * 2.5,
-      ) / Math.max(distance, 1e-30)
-    camera.sub(anchor).multiplyScalar(clamped).add(anchor)
-    target.sub(anchor).multiplyScalar(clamped).add(anchor)
     const solid =
       aimed &&
       [
@@ -569,8 +650,21 @@ export class ContinuousMap {
         'dwarf-planet',
         'comet',
         'black-hole',
+        'quasar',
         'neutron-star',
       ].includes(aimed.kind)
+    const minimum = Math.max(
+      this.minimumCameraDistance(anchor),
+      locked && solid ? locked.radius * 1.05 : 0,
+    )
+    const clamped =
+      THREE.MathUtils.clamp(
+        distance * factor,
+        minimum,
+        OBSERVABLE_RADIUS_PC * 2.5,
+      ) / Math.max(distance, 1e-30)
+    camera.sub(anchor).multiplyScalar(clamped).add(anchor)
+    target.sub(anchor).multiplyScalar(clamped).add(anchor)
     if (
       aimed &&
       solid &&
@@ -631,6 +725,7 @@ export class ContinuousMap {
       return entry.radius / 4
     if (entry.kind === 'neutron-star') return entry.radius / 0.55
     if (entry.kind === 'cluster') return entry.radius / 6.4
+    if (entry.kind === 'star-cluster') return entry.radius / 4
     if (entry.kind === 'universe') return entry.radius / 8.5
     return entry.radius
   }
@@ -691,6 +786,7 @@ export class ContinuousMap {
 
   update(now: number, elapsed: number, keys: ReadonlySet<string>) {
     this.frame++
+    this.controls.zoomToCursor = !this.followLocked
     this.controls.update()
     this.readCamera()
     const date = new Date(this.timestamp)
@@ -799,6 +895,12 @@ export class ContinuousMap {
         this.worldTarget.copy(this.flight.target)
         this.flight = null
       }
+    }
+    if (this.followLocked && this.following && !this.flight) {
+      this.worldCamera.add(
+        this.following.position.clone().sub(this.worldTarget),
+      )
+      this.worldTarget.copy(this.following.position)
     }
     this.setWorldCamera(this.worldCamera, this.worldTarget)
     const positionAttribute = this.cloud.geometry.attributes
@@ -916,14 +1018,16 @@ export class ContinuousMap {
       path.line.visible =
         this.options.orbits &&
         this.unit < 0.02 &&
-        this.unit > (path.moon ? 1e-11 : 1e-9)
+        this.unit > (path.parentId ? 1e-11 : 1e-9)
       if (!path.line.visible) continue
       const buffer = path.line.geometry.attributes
         .position as THREE.BufferAttribute
-      const earthPosition = this.index.get('earth')!.position
+      const primaryPosition = path.parentId
+        ? this.index.get(path.parentId)?.position
+        : undefined
       path.positions.forEach((point, index) => {
         this.projected.copy(point)
-        if (path.moon) this.projected.add(earthPosition)
+        if (primaryPosition) this.projected.add(primaryPosition)
         this.projected.sub(this.origin).divideScalar(this.unit)
         buffer.setXYZ(
           index,
@@ -952,6 +1056,9 @@ export class ContinuousMap {
       .map((model) => model.entry.id)
       .join(',')
     canvas.dataset.worldTarget = this.worldTarget.toArray().join(',')
+    canvas.dataset.followingId = this.followLocked
+      ? (this.following?.id ?? '')
+      : ''
     if (now - this.lastTelemetry > 250) {
       const span = this.worldCamera.distanceTo(this.worldTarget) * 1.4
       const region =
@@ -974,14 +1081,16 @@ export class ContinuousMap {
               : entry.radius * 3)
       const selectedEntry = this.index.get(this.selected)
       const focused =
-        selectedEntry && isFocused(selectedEntry)
-          ? selectedEntry
-          : this.entries.find(
-              (entry) =>
-                !entry.aggregate &&
-                entry.kind !== 'exoplanet' &&
-                isFocused(entry),
-            )
+        this.followLocked && this.following
+          ? this.following
+          : selectedEntry && isFocused(selectedEntry)
+            ? selectedEntry
+            : this.entries.find(
+                (entry) =>
+                  !entry.aggregate &&
+                  entry.kind !== 'exoplanet' &&
+                  isFocused(entry),
+              )
       const detail: MapTelemetry = {
         region,
         span: formatWorldDistance(span),
@@ -993,6 +1102,7 @@ export class ContinuousMap {
         nearest: this.nearest?.name ?? 'Deep space',
         mapped: this.entries.length,
         focusedId: focused?.id,
+        followingId: this.followLocked ? this.following?.id : undefined,
       }
       this.host.dispatchEvent(new CustomEvent('map-position', { detail }))
       this.lastTelemetry = now

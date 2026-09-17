@@ -38,12 +38,15 @@ export function catalogToWorld(positionPc: Position): Position {
 
 export function solarPositionPc(object: CelestialObject, date: Date): Position {
   const position = eclipticToWorld(getPosition(object, date))
-  if (object.id !== 'moon') return position
-  const earth = RotateVector(galacticRotation, HelioVector(Body.Earth, date))
+  if (object.id !== 'moon' && !object.jovianMoon) return position
+  const primary = RotateVector(
+    galacticRotation,
+    HelioVector(object.jovianMoon ? Body.Jupiter : Body.Earth, date),
+  )
   return [
-    position[0] + earth.x / AU_PER_PARSEC,
-    position[1] + earth.z / AU_PER_PARSEC,
-    position[2] - earth.y / AU_PER_PARSEC,
+    position[0] + primary.x / AU_PER_PARSEC,
+    position[1] + primary.z / AU_PER_PARSEC,
+    position[2] - primary.y / AU_PER_PARSEC,
   ]
 }
 

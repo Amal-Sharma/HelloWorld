@@ -20,6 +20,7 @@ export type ObjectKind =
   | 'quasar'
   | 'galaxy'
   | 'cluster'
+  | 'star-cluster'
   | 'system'
   | 'universe'
 export type SceneKind =
@@ -32,6 +33,7 @@ export type SceneKind =
   | 'pulsar'
   | 'galaxy'
   | 'cluster'
+  | 'star-cluster'
   | 'system'
   | 'universe'
 
@@ -77,6 +79,13 @@ export interface CelestialObject {
   rotationHours?: number
   galacticPosition?: [number, number, number]
   elements?: OrbitalElements
+  jovianMoon?: 'io' | 'europa' | 'ganymede' | 'callisto'
+  skyPosition?: {
+    rightAscensionHours: number
+    declinationDegrees: number
+    distancePc: number
+    radiusPc: number
+  }
   facts: { label: string; value: string }[]
   orbit: OrbitData
   source: string
@@ -98,6 +107,7 @@ export const categories: { kind: ObjectKind; label: string }[] = [
   { kind: 'quasar', label: 'Quasars' },
   { kind: 'galaxy', label: 'Galaxies' },
   { kind: 'cluster', label: 'Groups & clusters' },
+  { kind: 'star-cluster', label: 'Star clusters' },
   { kind: 'universe', label: 'Observable universe' },
 ]
 
@@ -1039,6 +1049,558 @@ catalog.push({
   source: 'https://github.com/astronexus/HYG-Database/tree/main/hyg',
 })
 
+const jovianMoons = [
+  {
+    id: 'io',
+    name: 'Io',
+    radius: 1821.6,
+    axis: 421700,
+    period: 1.769138,
+    eccentricity: 0.0041,
+    inclination: 0.036,
+    color: '#e1c66e',
+    temperature: '-143 C',
+    description:
+      'The most volcanically active world in the Solar System. Tidal flexing from Jupiter and neighboring moons heats its interior, feeding lava lakes, volcanic plumes, and sulfur-rich plains.',
+  },
+  {
+    id: 'europa',
+    name: 'Europa',
+    radius: 1560.8,
+    axis: 671034,
+    period: 3.551181,
+    eccentricity: 0.0094,
+    inclination: 0.466,
+    color: '#d4c6b3',
+    temperature: '-160 C',
+    description:
+      'A fractured ice shell covers a global saltwater ocean. Tidal heating keeps liquid water beneath the surface, making Europa a key target in the search for habitable environments beyond Earth.',
+  },
+  {
+    id: 'ganymede',
+    name: 'Ganymede',
+    radius: 2634.1,
+    axis: 1070412,
+    period: 7.154553,
+    eccentricity: 0.0013,
+    inclination: 0.177,
+    color: '#a79d8d',
+    temperature: '-163 C',
+    description:
+      'The largest moon in the Solar System is bigger than Mercury. Ancient dark terrain and brighter grooved regions cover an icy interior, and Ganymede generates its own magnetic field.',
+  },
+  {
+    id: 'callisto',
+    name: 'Callisto',
+    radius: 2410.3,
+    axis: 1882709,
+    period: 16.689018,
+    eccentricity: 0.0074,
+    inclination: 0.192,
+    color: '#928a7d',
+    temperature: '-139 C',
+    description:
+      'A heavily cratered ice-and-rock world preserving billions of years of impacts. Callisto is the outermost Galilean moon and may contain a buried ocean beneath its ancient surface.',
+  },
+] as const
+
+catalog.push(
+  ...jovianMoons.map((moon): CelestialObject => ({
+    id: moon.id,
+    name: moon.name,
+    kind: 'moon',
+    scene: 'planet',
+    jovianMoon: moon.id,
+    classification: 'Galilean moon',
+    subtitle: `A world in Jupiter's family.`,
+    description: moon.description,
+    location: 'Jupiter / Solar System',
+    distance: `${moon.axis.toLocaleString('en-US')} km from Jupiter`,
+    color: moon.color,
+    parent: 'jupiter',
+    radiusKm: moon.radius,
+    rotationHours: moon.period * 24,
+    facts: [
+      {
+        label: 'Mean radius',
+        value: `${moon.radius.toLocaleString('en-US')} km`,
+      },
+      { label: 'Mean temperature', value: moon.temperature },
+      { label: 'Rotation', value: 'Tidally locked' },
+      { label: 'Host planet', value: 'Jupiter' },
+    ],
+    orbit: {
+      parent: 'Jupiter',
+      period: `${moon.period} days`,
+      periodDays: moon.period,
+      semiMajorAxis: moon.axis / 149597870.7,
+      eccentricity: moon.eccentricity,
+      inclination: moon.inclination,
+      speed: `${((2 * Math.PI * moon.axis) / (moon.period * 86400)).toFixed(2)} km/s`,
+      model: 'ephemeris',
+      note: "Jovicentric positions from Astronomy Engine, added to Jupiter's heliocentric position in the unified map. The listed mean inclination is relative to Jupiter's equator. Surface appearance is illustrative.",
+    },
+    source: `https://science.nasa.gov/jupiter/moons/${moon.id}/`,
+  })),
+)
+
+const deepSky: {
+  id: string
+  name: string
+  kind: ObjectKind
+  scene: SceneKind
+  type: string
+  ra: number
+  dec: number
+  distance: number
+  radius: number
+  color: string
+  parent: string
+  description: string
+  source: string
+}[] = [
+  {
+    id: 'pleiades',
+    name: 'Pleiades',
+    kind: 'star-cluster',
+    scene: 'star-cluster',
+    type: 'Open star cluster / M45',
+    ra: 3.79,
+    dec: 24.12,
+    distance: 136,
+    radius: 4,
+    color: '#9acafa',
+    parent: 'milky-way',
+    description:
+      "A young cluster of hot blue stars crossing a cloud of interstellar dust. The blue reflection nebulosity is illuminated dust, not material left over from the cluster's birth.",
+    source: 'https://science.nasa.gov/universe/stars/',
+  },
+  {
+    id: 'omega-centauri',
+    name: 'Omega Centauri',
+    kind: 'star-cluster',
+    scene: 'star-cluster',
+    type: 'Globular star cluster / NGC 5139',
+    ra: 13.446,
+    dec: -47.48,
+    distance: 5240,
+    radius: 23,
+    color: '#ffe1b0',
+    parent: 'milky-way',
+    description:
+      'A massive, ancient stellar system containing millions of stars. Its multiple stellar populations suggest a complex history, possibly as the stripped core of a dwarf galaxy.',
+    source: 'https://science.nasa.gov/universe/stars/',
+  },
+  {
+    id: 'hercules-cluster',
+    name: 'Hercules Globular Cluster',
+    kind: 'star-cluster',
+    scene: 'star-cluster',
+    type: 'Globular star cluster / M13',
+    ra: 16.695,
+    dec: 36.46,
+    distance: 6800,
+    radius: 22,
+    color: '#e5d3b5',
+    parent: 'milky-way',
+    description:
+      "Hundreds of thousands of old stars form a dense spherical cluster in the Milky Way's halo. Stellar orbits within the cluster differ from one another; there is no single common orbit.",
+    source:
+      'https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-13-the-hercules-cluster/',
+  },
+  {
+    id: 'eagle-nebula',
+    name: 'Eagle Nebula',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Emission nebula / M16',
+    ra: 18.313,
+    dec: -13.79,
+    distance: 1750,
+    radius: 10.5,
+    color: '#d5a28d',
+    parent: 'milky-way',
+    description:
+      'Young stars illuminate this star-forming cloud, home to the Pillars of Creation. Dense columns of gas and dust are sculpted by ultraviolet radiation and stellar winds.',
+    source:
+      'https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-16-the-eagle-nebula/',
+  },
+  {
+    id: 'lagoon-nebula',
+    name: 'Lagoon Nebula',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Emission nebula / M8',
+    ra: 18.062,
+    dec: -24.38,
+    distance: 1250,
+    radius: 16,
+    color: '#e79aa5',
+    parent: 'milky-way',
+    description:
+      'A luminous cloud of ionized gas, dark dust lanes, and young stars in Sagittarius. Its bright central regions are energized by massive stars forming within the nebula.',
+    source:
+      'https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-8-the-lagoon-nebula/',
+  },
+  {
+    id: 'trifid-nebula',
+    name: 'Trifid Nebula',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Emission and reflection nebula / M20',
+    ra: 18.042,
+    dec: -23.03,
+    distance: 1250,
+    radius: 3.2,
+    color: '#cda1dc',
+    parent: 'milky-way',
+    description:
+      'Dark dust lanes divide a glowing red emission cloud, while nearby dust reflects blue starlight. The Trifid combines several distinct nebular processes in one star-forming region.',
+    source: 'https://science.nasa.gov/universe/nebulae/',
+  },
+  {
+    id: 'horsehead-nebula',
+    name: 'Horsehead Nebula',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Dark nebula / Barnard 33',
+    ra: 5.683,
+    dec: -2.46,
+    distance: 422,
+    radius: 1.05,
+    color: '#b88c88',
+    parent: 'milky-way',
+    description:
+      "A dense, cold cloud seen in silhouette against glowing gas in Orion. Radiation from nearby stars illuminates and erodes the cloud's edge.",
+    source: 'https://science.nasa.gov/universe/nebulae/',
+  },
+  {
+    id: 'ring-nebula',
+    name: 'Ring Nebula',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Planetary nebula / M57',
+    ra: 18.893,
+    dec: 33.03,
+    distance: 790,
+    radius: 0.4,
+    color: '#88d6d0',
+    parent: 'milky-way',
+    description:
+      'The expanding envelope of a dying Sun-like star forms a bright barrel-shaped shell. A hot central white dwarf ionizes the surrounding gas; the familiar ring is a projection of its three-dimensional structure.',
+    source:
+      'https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-57-the-ring-nebula/',
+  },
+  {
+    id: 'dumbbell-nebula',
+    name: 'Dumbbell Nebula',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Planetary nebula / M27',
+    ra: 19.993,
+    dec: 22.72,
+    distance: 410,
+    radius: 0.55,
+    color: '#91d9c5',
+    parent: 'milky-way',
+    description:
+      'An expanding shell of gas shed by an evolved star. Its bright lobes trace ionized material surrounding a compact white dwarf.',
+    source: 'https://science.nasa.gov/universe/nebulae/',
+  },
+  {
+    id: 'rosette-nebula',
+    name: 'Rosette Nebula',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Emission nebula / NGC 2237',
+    ra: 6.533,
+    dec: 4.95,
+    distance: 1600,
+    radius: 20,
+    color: '#e29aab',
+    parent: 'milky-way',
+    description:
+      'A vast star-forming cloud surrounds the young cluster NGC 2244. Powerful winds from massive stars have opened a cavity through the center of the glowing gas.',
+    source: 'https://science.nasa.gov/universe/nebulae/',
+  },
+  {
+    id: 'cassiopeia-a',
+    name: 'Cassiopeia A',
+    kind: 'supernova',
+    scene: 'supernova',
+    type: 'Core-collapse supernova remnant',
+    ra: 23.391,
+    dec: 58.8,
+    distance: 3400,
+    radius: 2.5,
+    color: '#d5b68b',
+    parent: 'milky-way',
+    description:
+      'A young supernova remnant with expanding knots of heavy elements, shock-heated gas, and a compact central neutron star. Its ejecta trace a stellar explosion whose light reached Earth roughly three centuries ago.',
+    source: 'https://science.nasa.gov/universe/stars/',
+  },
+  {
+    id: 'veil-nebula',
+    name: 'Veil Nebula',
+    kind: 'supernova',
+    scene: 'supernova',
+    type: 'Supernova remnant / Cygnus Loop',
+    ra: 20.75,
+    dec: 30.7,
+    distance: 735,
+    radius: 18,
+    color: '#9fcfd3',
+    parent: 'milky-way',
+    description:
+      'Delicate filaments mark the shock front of an ancient supernova. The expanding blast wave collides with surrounding interstellar gas, producing glowing arcs across the Cygnus Loop.',
+    source: 'https://science.nasa.gov/universe/nebulae/',
+  },
+  {
+    id: 'large-magellanic-cloud',
+    name: 'Large Magellanic Cloud',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Barred irregular dwarf galaxy',
+    ra: 5.392,
+    dec: -69.76,
+    distance: 49970,
+    radius: 7000,
+    color: '#b5c7e6',
+    parent: 'local-group',
+    description:
+      'A nearby satellite galaxy of the Milky Way, rich in young stars and star-forming nebulae. Its asymmetric stellar bar and gas clouds have been shaped by gravitational interactions.',
+    source: 'https://science.nasa.gov/universe/galaxies/',
+  },
+  {
+    id: 'small-magellanic-cloud',
+    name: 'Small Magellanic Cloud',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Irregular dwarf galaxy',
+    ra: 0.879,
+    dec: -72.83,
+    distance: 61700,
+    radius: 3500,
+    color: '#b0c8df',
+    parent: 'local-group',
+    description:
+      'An irregular companion of the Milky Way and the Large Magellanic Cloud. Its structure and streams of gas reflect a long history of tidal interaction.',
+    source: 'https://science.nasa.gov/universe/galaxies/',
+  },
+  {
+    id: 'tarantula-nebula',
+    name: 'Tarantula Nebula',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Giant star-forming region / 30 Doradus',
+    ra: 5.645,
+    dec: -69.1,
+    distance: 49970,
+    radius: 100,
+    color: '#d4b6c6',
+    parent: 'large-magellanic-cloud',
+    description:
+      'One of the most energetic stellar nurseries in the Local Group. Massive young stars in the Large Magellanic Cloud sculpt its complex cavities and luminous filaments.',
+    source: 'https://science.nasa.gov/mission/webb/',
+  },
+  {
+    id: 'bodes-galaxy',
+    name: "Bode's Galaxy",
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Spiral galaxy / M81',
+    ra: 9.926,
+    dec: 69.065,
+    distance: 3630000,
+    radius: 13700,
+    color: '#d5c7ae',
+    parent: 'universe',
+    description:
+      'A grand spiral galaxy in Ursa Major with a bright central bulge and sweeping dust lanes. M81 interacts gravitationally with neighboring galaxies, including the starburst galaxy M82.',
+    source:
+      'https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-81-bodes-galaxy/',
+  },
+  {
+    id: 'cigar-galaxy',
+    name: 'Cigar Galaxy',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Starburst galaxy / M82',
+    ra: 9.931,
+    dec: 69.68,
+    distance: 3530000,
+    radius: 5600,
+    color: '#d8a1a4',
+    parent: 'universe',
+    description:
+      'Intense star formation drives a galactic wind above and below this nearly edge-on galaxy. Its close interaction with M81 has helped trigger its active central starburst.',
+    source:
+      'https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-82-the-cigar-galaxy/',
+  },
+  {
+    id: 'sombrero-galaxy',
+    name: 'Sombrero Galaxy',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Lenticular / spiral galaxy / M104',
+    ra: 12.666,
+    dec: -11.62,
+    distance: 9550000,
+    radius: 15000,
+    color: '#eadac0',
+    parent: 'universe',
+    description:
+      "A brilliant central bulge and broad dark dust ring create the Sombrero's distinctive silhouette. Its halo contains a large population of globular star clusters.",
+    source:
+      'https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-104-the-sombrero-galaxy/',
+  },
+  {
+    id: 'pinwheel-galaxy',
+    name: 'Pinwheel Galaxy',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Face-on spiral galaxy / M101',
+    ra: 14.054,
+    dec: 54.349,
+    distance: 6400000,
+    radius: 26000,
+    color: '#b7cfed',
+    parent: 'universe',
+    description:
+      'A large face-on spiral with asymmetric arms and giant star-forming regions. Its extended disk offers a broad view of how gas, dust, and young stars trace spiral structure.',
+    source:
+      'https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-101-the-pinwheel-galaxy/',
+  },
+  {
+    id: 'centaurus-a',
+    name: 'Centaurus A',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Peculiar active galaxy / NGC 5128',
+    ra: 13.425,
+    dec: -43.02,
+    distance: 3800000,
+    radius: 18500,
+    color: '#dbc6a8',
+    parent: 'universe',
+    description:
+      'A prominent dust lane crosses an elliptical stellar halo. Its active supermassive black hole powers jets and vast radio lobes, and the galaxy likely bears the imprint of a past merger.',
+    source: 'https://science.nasa.gov/universe/galaxies/active-galaxies/',
+  },
+  {
+    id: 'messier-87',
+    name: 'Messier 87',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Giant elliptical galaxy',
+    ra: 12.514,
+    dec: 12.391,
+    distance: 16800000,
+    radius: 18000,
+    color: '#e6d4b9',
+    parent: 'virgo',
+    description:
+      'A giant elliptical galaxy near the center of the Virgo Cluster. Its enormous population of stars and globular clusters surrounds M87*, the black hole first imaged by the Event Horizon Telescope.',
+    source: 'https://science.nasa.gov/universe/galaxies/',
+  },
+  {
+    id: 'fornax-cluster',
+    name: 'Fornax Cluster',
+    kind: 'cluster',
+    scene: 'cluster',
+    type: 'Galaxy cluster',
+    ra: 3.636,
+    dec: -35.45,
+    distance: 20000000,
+    radius: 700000,
+    color: '#cfdfeb',
+    parent: 'universe',
+    description:
+      'A nearby galaxy cluster dominated by the elliptical galaxy NGC 1399. Its member galaxies move within a shared gravitational potential and a hot intracluster medium.',
+    source: 'https://science.nasa.gov/universe/galaxies/',
+  },
+  {
+    id: 'coma-cluster',
+    name: 'Coma Cluster',
+    kind: 'cluster',
+    scene: 'cluster',
+    type: 'Rich galaxy cluster / Abell 1656',
+    ra: 12.992,
+    dec: 27.98,
+    distance: 100000000,
+    radius: 3000000,
+    color: '#c4d4e5',
+    parent: 'universe',
+    description:
+      'Thousands of galaxies inhabit this rich cluster. Their rapid motions and the gravity required to bind them provided early evidence for the presence of dark matter.',
+    source: 'https://science.nasa.gov/universe/galaxies/',
+  },
+  {
+    id: 'perseus-cluster',
+    name: 'Perseus Cluster',
+    kind: 'cluster',
+    scene: 'cluster',
+    type: 'Galaxy cluster / Abell 426',
+    ra: 3.33,
+    dec: 41.51,
+    distance: 73000000,
+    radius: 2500000,
+    color: '#c4d7e9',
+    parent: 'universe',
+    description:
+      'A massive cluster filled with hot, X-ray-emitting gas. Activity from the central galaxy NGC 1275 inflates cavities in the gas and sends pressure waves through the intracluster medium.',
+    source: 'https://science.nasa.gov/universe/galaxies/',
+  },
+]
+
+catalog.push(
+  ...deepSky.map((item): CelestialObject => ({
+    id: item.id,
+    name: item.name,
+    kind: item.kind,
+    scene: item.scene,
+    classification: item.type,
+    subtitle: item.type.split(' / ')[0],
+    description: item.description,
+    location: `${item.parent === 'universe' ? 'Extragalactic space' : item.parent.replaceAll('-', ' ')} / J2000 sky position`,
+    distance: `~${(item.distance * 3.26156).toLocaleString('en-US', { maximumSignificantDigits: 3 })} light-years`,
+    color: item.color,
+    parent: item.parent,
+    skyPosition: {
+      rightAscensionHours: item.ra,
+      declinationDegrees: item.dec,
+      distancePc: item.distance,
+      radiusPc: item.radius,
+    },
+    facts: [
+      {
+        label: 'Distance',
+        value: `~${item.distance.toLocaleString('en-US')} pc`,
+      },
+      {
+        label: 'Approximate span',
+        value: `${(item.radius * 2 * 3.26156).toLocaleString('en-US', { maximumSignificantDigits: 3 })} ly`,
+      },
+      { label: 'Right ascension', value: `${item.ra} h` },
+      { label: 'Declination', value: `${item.dec} deg` },
+    ],
+    orbit: noOrbit(
+      'The map uses an approximate reference distance and J2000 direction. Internal stars and gas have individual motions; no single precise orbit applies to this extended object. Shape and depth are illustrative.',
+      item.parent === 'milky-way'
+        ? 'Milky Way'
+        : 'Local gravitational environment',
+    ),
+    source: item.source,
+  })),
+)
+objectReference('m87-black-hole', 'messier-87')
+objectReference('sn1987a', 'large-magellanic-cloud')
+
+function objectReference(id: string, parent: string) {
+  const object = catalog.find((item) => item.id === id)
+  if (object) object.parent = parent
+}
+
 class CatalogRegistry extends Map<string, CelestialObject> {
   override get(id: string) {
     return super.get(id) ?? getExtendedObject(id)
@@ -1079,7 +1641,8 @@ export function searchCatalog(
     .replace(/tsar/g, 'quasar')
   const curated = catalog.filter((object) => {
     const nearby =
-      Boolean(object.body) || ['moon', 'solar-system'].includes(object.id)
+      Boolean(object.body || object.jovianMoon) ||
+      ['moon', 'solar-system'].includes(object.id)
     if (scope === 'nearby' && !nearby) return false
     if (scope === 'deep' && nearby) return false
     return `${object.name} ${object.classification} ${object.kind.replaceAll('-', ' ')} ${object.location}`

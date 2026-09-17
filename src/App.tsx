@@ -1,10 +1,4 @@
-import {
-  startTransition,
-  useEffect,
-  useEffectEvent,
-  useRef,
-  useState,
-} from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react'
 import {
   ArrowRight,
@@ -30,6 +24,7 @@ import {
   LocateFixed,
   Maximize,
   Menu,
+  Minimize,
   Minus,
   Orbit,
   PanelLeftClose,
@@ -92,6 +87,7 @@ const kindIcons: Record<ObjectKind, typeof Globe2> = {
   quasar: Telescope,
   galaxy: Orbit,
   cluster: Grid2X2,
+  'star-cluster': Sparkles,
   system: Orbit,
   universe: Compass,
 }
@@ -319,7 +315,10 @@ function App() {
     const parameters = new URLSearchParams(window.location.search)
     const requested = parameters.get('view')
     const target = objectById.get(parameters.get('object') ?? 'solar-system')
-    if (requested === 'orbit') return target && !['ephemeris', 'kepler'].includes(target.orbit.model) ? 'object' : 'orbit'
+    if (requested === 'orbit')
+      return target && !['ephemeris', 'kepler'].includes(target.orbit.model)
+        ? 'object'
+        : 'orbit'
     return requested === 'object' ? 'object' : 'map'
   })
   const [query, setQuery] = useState('')
@@ -347,6 +346,9 @@ function App() {
   const [navigation, setNavigation] = useState<'orbit' | 'pan'>('orbit')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sourcesOpen, setSourcesOpen] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(() =>
+    Boolean(document.fullscreenElement),
+  )
   const [timestamp, setTimestamp] = useState(Date.UTC(2026, 8, 16, 12))
   const [playing, setPlaying] = useState(true)
   const [speed, setSpeed] = useState(1 / 24)
@@ -359,7 +361,16 @@ function App() {
   const sourcesRef = useRef<HTMLDialogElement>(null)
   const noticeTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
   const simulationRef = useRef(timestamp)
-  const startupDestination = useRef(new URLSearchParams(window.location.search).get('object'))
+  const startupDestination = useRef(
+    new URLSearchParams(window.location.search).get('object'),
+  )
+  useEffect(() => {
+    const updateFullscreen = () =>
+      setIsFullscreen(Boolean(document.fullscreenElement))
+    document.addEventListener('fullscreenchange', updateFullscreen)
+    return () =>
+      document.removeEventListener('fullscreenchange', updateFullscreen)
+  }, [])
   const destination = objectById.get(selectedId) ?? earth
   const object =
     view === 'map' && mapPosition?.focusedId
@@ -380,6 +391,11 @@ function App() {
     ['ephemeris', 'kepler'].includes(object.orbit.model) &&
     getPosition(object, new Date(timestamp)).every(Number.isFinite)
   const hasSaved = bookmarks.includes(object.id)
+  const following = view === 'map' && Boolean(mapPosition?.followingId)
+  const canFollow =
+    view === 'map' &&
+    !['system', 'universe'].includes(object.kind) &&
+    !['local-group', 'laniakea'].includes(object.id)
   const savedMatches = bookmarks
     .map((id) => objectById.get(id))
     .filter((item): item is CelestialObject => {
@@ -417,15 +433,13 @@ function App() {
     if (!next) return
     cancelStartupNavigation()
     const nextView = view === 'orbit' ? 'map' : view
-    startTransition(() => {
-      setSelectedId(id)
-      setView(nextView)
-      setInspectorTab('overview')
-      setShowSidebar(false)
-      setExpanded((current) =>
-        current.includes(next.kind) ? current : [...current, next.kind],
-      )
-    })
+    setSelectedId(id)
+    setView(nextView)
+    setInspectorTab('overview')
+    setShowSidebar(false)
+    setExpanded((current) =>
+      current.includes(next.kind) ? current : [...current, next.kind],
+    )
     updateLocation(id, nextView)
   }
 
@@ -442,7 +456,11 @@ function App() {
 
   function sendCommand(action: SceneCommand['action'], distancePc?: number) {
     if (action !== 'screenshot') cancelStartupNavigation()
-    setCommand((current) => ({ action, serial: (current?.serial ?? 0) + 1, distancePc }))
+    setCommand((current) => ({
+      action,
+      serial: (current?.serial ?? 0) + 1,
+      distancePc,
+    }))
   }
 
   function setInspectionView(next: ViewMode) {
@@ -450,6 +468,15 @@ function App() {
     if (next !== 'map') setSelectedId(object.id)
     setView(next)
     updateLocation(next === 'map' ? selectedId : object.id, next)
+  }
+
+  function toggleFollow() {
+    cancelStartupNavigation()
+    setCommand((current) => ({
+      action: 'follow',
+      serial: (current?.serial ?? 0) + 1,
+      bodyId: following ? null : object.id,
+    }))
   }
 
   function setDate(value: number) {
@@ -496,7 +523,8 @@ function App() {
     }
     if (
       ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) ||
-      target.isContentEditable || document.querySelector('dialog[open]')
+      target.isContentEditable ||
+      document.querySelector('dialog[open]')
     )
       return
     if (event.key === '/') {
@@ -644,11 +672,11 @@ function App() {
               event.preventDefault()
               selectObject('earth')
             }}
-            aria-label="Atlas home"
+            aria-label="Hello World home"
           >
             <Orbit size={28} strokeWidth={1.3} />
             <span>
-              ATLAS<span className="brand-period">.</span>
+              Hello World<span className="brand-period">.</span>
             </span>
           </a>
           <span className="brand-caption">UNIVERSE EXPLORER</span>
@@ -1033,6 +1061,21 @@ function App() {
         )}
       </div>
       <div className="viewer-tools" role="toolbar" aria-label="Camera controls">
+        {view === 'map' && (
+          <IconButton
+            label={
+              following
+                ? `Stop following ${objectById.get(mapPosition!.followingId!)?.name ?? 'body'}`
+                : `Follow ${object.name}`
+            }
+            active={following}
+            aria-pressed={following}
+            disabled={!canFollow && !following}
+            onClick={toggleFollow}
+          >
+            <LocateFixed size={18} />
+          </IconButton>
+        )}
         <IconButton label="Zoom in" onClick={() => sendCommand('zoom-in')}>
           <Plus size={18} />
         </IconButton>
@@ -1049,11 +1092,30 @@ function App() {
         >
           <Camera size={17} />
         </IconButton>
-        <IconButton label="Toggle fullscreen" onClick={toggleFullscreen}>
-          <Maximize size={16} />
+        <IconButton
+          label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+          active={isFullscreen}
+          aria-pressed={isFullscreen}
+          onClick={toggleFullscreen}
+        >
+          {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
         </IconButton>
       </div>
       <div className="view-layers">
+        {view === 'map' && (
+          <button
+            className={`follow-control ${following ? 'enabled' : ''}`}
+            role="switch"
+            aria-label="Follow selected body"
+            aria-checked={following}
+            disabled={!canFollow && !following}
+            onClick={toggleFollow}
+          >
+            <LocateFixed size={14} />
+            <span>{following ? 'Following' : 'Follow'}</span>
+            <span className="mini-toggle" />
+          </button>
+        )}
         <button
           className={orbits ? 'enabled' : ''}
           role="switch"
@@ -1541,7 +1603,7 @@ function App() {
       >
         <div className="dialog-inner">
           <div className="dialog-heading">
-            <span className="eyebrow">ATLAS / DATA & CREDITS</span>
+            <span className="eyebrow">HELLO WORLD / DATA & CREDITS</span>
             <IconButton
               label="Close data and credits"
               onClick={() => setSourcesOpen(false)}
@@ -1559,7 +1621,7 @@ function App() {
           </p>
           <h3>Astronomical model</h3>
           <p>
-            Planet and Moon positions are calculated with{' '}
+            Planet, Moon, and Galilean satellite positions are calculated with{' '}
             <a
               href="https://github.com/cosinekitty/astronomy"
               target="_blank"
@@ -1600,9 +1662,17 @@ function App() {
             artistic reconstructions, not photographs or relativistic
             simulations.
           </p>
+          <p>
+            Io, Europa, Ganymede, and Callisto follow calculated
+            Jupiter-centered orbits; their surface patterns are illustrative.
+            Solar prominences, plasma ejections, and granulation are time-scaled
+            visual effects, not live solar-weather observations. Black-hole
+            motion represents accretion flow and jet pulses, not a visible solid
+            surface or measured spin.
+          </p>
           <h3>Sources</h3>
           <p>
-            The Milky Way's light and dust use the{' '}
+            The Milky Way's particle density and colors are sampled from the{' '}
             <a
               href="https://science.nasa.gov/photojournal/our-milky-way-gets-a-makeover-artist-concept/"
               target="_blank"
@@ -1610,7 +1680,8 @@ function App() {
             >
               NASA/JPL-Caltech PIA10748 artist's concept
             </a>
-            , adapted onto a warped disk with image-aligned 3D stars. Courtesy
+            , arranged as glowing stars in a warped 3D disk, central bulge, and
+            sparse halo, without a flat image surface. Courtesy
             NASA/JPL-Caltech, under the{' '}
             <a
               href="https://www.jpl.nasa.gov/jpl-image-use-policy/"

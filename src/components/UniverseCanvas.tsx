@@ -6,9 +6,10 @@ import type { SceneOptions, ViewMode } from './spaceScene'
 import type { MapTelemetry } from './ContinuousMap'
 
 export interface SceneCommand {
-  action: 'zoom-in' | 'zoom-out' | 'reset' | 'screenshot' | 'scale'
+  action: 'zoom-in' | 'zoom-out' | 'reset' | 'screenshot' | 'scale' | 'follow'
   serial: number
   distancePc?: number
+  bodyId?: string | null
 }
 
 interface Props {
@@ -106,6 +107,8 @@ export default function UniverseCanvas({
     if (command.action === 'reset') scene.current.reset()
     if (command.action === 'scale' && command.distancePc !== undefined)
       scene.current.setMapScale(command.distancePc)
+    if (command.action === 'follow')
+      scene.current.followBody(command.bodyId ?? null)
     if (command.action === 'screenshot') {
       try {
         scene.current.screenshot()

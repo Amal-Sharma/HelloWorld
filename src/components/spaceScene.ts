@@ -2,6 +2,18 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js'
 import { ContinuousMap } from './ContinuousMap'
+import type { CameraPose, Viewpoint } from '../lib/viewpoints'
+import { comparisonLayout } from '../lib/scienceTools'
+import { Body } from 'astronomy-engine'
+import {
+  defaultObserver,
+  earthShadow,
+  horizontalDirection,
+  observerBody,
+  observerStars,
+  solarObscuration,
+} from '../lib/observer'
+import type { ObserverSite } from '../lib/observer'
 import { earth, objectById, solarPlanets } from '../data/catalog'
 import type { CelestialObject } from '../data/catalog'
 import type { OrbitalElements } from '../data/catalog'
@@ -22,18 +34,28 @@ import {
   smallBodyPosition,
 } from '../lib/astronomy'
 
+export type GalaxyStyle = 'original' | 'reference'
+
 export interface SceneOptions {
   orbits: boolean
   labels: boolean
   compressed: boolean
   playing: boolean
   highQuality: boolean
+  adaptiveQuality?: boolean
+  ruler?: readonly [string, string] | null
+  comparison?: string[]
+  observer?: ObserverSite
+  skyFocus?: 'Sun' | 'Moon' | null
   inspectorOpen: boolean
+  uiHidden?: boolean
+  galaxyStyle?: GalaxyStyle
+  galacticDust?: boolean
   catalogRevision?: number
   navigation?: 'orbit' | 'pan'
 }
 
-export type ViewMode = 'map' | 'object' | 'orbit'
+export type ViewMode = 'map' | 'object' | 'orbit' | 'compare' | 'sky'
 
 interface OrbitEntry {
   node: THREE.Object3D
@@ -71,6 +93,7 @@ function hashId(id: string) {
 }
 
 function disposeGroup(group: THREE.Object3D) {
+  disposeModelAssets(group)
   group.traverse((object) => {
     const renderable = object as THREE.Mesh
     renderable.geometry?.dispose()
@@ -81,6 +104,23 @@ function disposeGroup(group: THREE.Object3D) {
       materials.forEach((material) => material.dispose())
     }
   })
+}
+
+function disposeModelAssets(group: THREE.Object3D) {
+  const textures = new Set<THREE.Texture>()
+  group.traverse((object) => {
+    object.userData.disposed = true
+    const material = (object as THREE.Mesh).material
+    if (!material) return
+    for (const item of Array.isArray(material) ? material : [material])
+      for (const value of Object.values(item))
+        if (value instanceof THREE.Texture && value.userData.modelAsset)
+          textures.add(value)
+  })
+  for (const texture of textures) {
+    texture.dispose()
+    if (typeof texture.image?.close === 'function') texture.image.close()
+  }
 }
 
 const particleVertex = `
@@ -120,6 +160,7 @@ export class SpaceScene {
   private starfield: THREE.Points
   private textures = new Map<string, THREE.Texture>()
   private loader = new THREE.TextureLoader()
+  private modelData = new Map<string, Promise<ArrayBuffer>>()
   private observer: ResizeObserver
   private frame = 0
   private disposed = false
@@ -130,6 +171,12 @@ export class SpaceScene {
   private timestamp = initialEpoch
   private visualTime = 0
   private lastFrame = 0
+  private controlActive = false
+  private navigationQuality = false
+  private lastCameraMotion = -Infinity
+  private previousViewOffset = new THREE.Vector3()
+  private previousViewRotation = new THREE.Quaternion()
+  private viewOffset = new THREE.Vector3()
   private lastEphemeris = -Infinity
   private entries: OrbitEntry[] = []
   private labels: SceneLabel[] = []
@@ -171,6 +218,9 @@ export class SpaceScene {
   private screenVector = new THREE.Vector3()
   private loadedAssets = 0
   private failedAssets = new Set<string>()
+  private skyLayer: THREE.Group | null = null
+  private lastSkyTime = -Infinity
+  private lastSkyFrame = -Infinity
   private onSelect: (id: string) => void
   private host: HTMLDivElement
   private labelHost: HTMLDivElement
@@ -218,6 +268,7 @@ export class SpaceScene {
     this.controls.zoomSpeed = 0.8
     this.controls.maxDistance = 160
     this.controls.addEventListener('start', this.handleControlStart)
+    this.controls.addEventListener('end', this.handleControlEnd)
     this.scene.add(new THREE.AmbientLight('#c9d7df', 0.14))
     const sunlight = new THREE.DirectionalLight('#fff7e9', 3.2)
     sunlight.position.set(-5, 3, 5)
@@ -257,7 +308,15 @@ export class SpaceScene {
     this.scheduleFrame()
   }
 
-  private handleControlStart = () => this.interruptFlight(true)
+  private handleControlStart = () => {
+    this.controlActive = true
+    this.interruptFlight(true)
+  }
+
+  private handleControlEnd = () => {
+    this.controlActive = false
+    this.lastCameraMotion = performance.now()
+  }
 
   private interruptFlight = (preserveFollow = false) => {
     this.host.dispatchEvent(new Event('map-navigation'))
@@ -331,6 +390,8 @@ export class SpaceScene {
   }
 
   private clearMovement = () => {
+    this.controlActive = false
+    this.lastCameraMotion = -Infinity
     this.pressedKeys.clear()
     this.movementVelocity.set(0, 0, 0)
     this.continuousMap?.stopMovement()
@@ -374,7 +435,9 @@ export class SpaceScene {
     const existing = this.textures.get(path)
     if (existing) return existing
     const texture = this.loader.load(
-      path,
+      path.startsWith('/') && !path.startsWith('//')
+        ? `${import.meta.env.BASE_URL}${path.slice(1)}`
+        : path,
       () => {
         if (this.disposed) return
         this.loadedAssets += 1
@@ -404,6 +467,95 @@ export class SpaceScene {
     )
     this.textures.set(path, texture)
     return texture
+  }
+
+  private loadModelData(path: string) {
+    let data = this.modelData.get(path)
+    if (!data) {
+      data = fetch(`${import.meta.env.BASE_URL}${path}`, {
+        signal: AbortSignal.timeout(20_000),
+      })
+        .then((response) => {
+          if (!response.ok) throw new Error(`Model unavailable: ${path}`)
+          return response.arrayBuffer()
+        })
+        .catch((error: unknown) => {
+          this.modelData.delete(path)
+          throw error
+        })
+      this.modelData.set(path, data)
+    }
+    return data
+  }
+
+  private spacecraft(object: CelestialObject, radius = 1) {
+    const holder = new THREE.Group()
+    holder.name = `spacecraft-${object.id}`
+    holder.userData.objectId = object.id
+    holder.userData.modelState = 'loading'
+    const fallback = new THREE.Mesh(
+      new THREE.OctahedronGeometry(radius * 0.2),
+      new THREE.MeshBasicMaterial({ color: object.color, wireframe: true }),
+    )
+    holder.add(fallback)
+    const model = object.model!
+    if (this.selected.id === object.id) {
+      this.renderer.domElement.dataset.modelState = 'loading'
+      this.renderer.domElement.dataset.modelObject = object.id
+    }
+    void Promise.all([
+      this.loadModelData(model.path),
+      import('three/addons/loaders/GLTFLoader.js'),
+    ])
+      .then(async ([data, { GLTFLoader }]) => {
+        const loaded = await new GLTFLoader().parseAsync(data.slice(0), '')
+        const root = loaded.scene
+        root.traverse((node) => {
+          const material = (node as THREE.Mesh).material
+          if (!material) return
+          for (const item of Array.isArray(material) ? material : [material])
+            for (const value of Object.values(item))
+              if (value instanceof THREE.Texture)
+                value.userData.modelAsset = true
+        })
+        if (this.disposed || holder.userData.disposed) {
+          disposeGroup(root)
+          return
+        }
+        const bounds = new THREE.Box3().setFromObject(root)
+        const sphere = bounds.getBoundingSphere(new THREE.Sphere())
+        if (!Number.isFinite(sphere.radius) || sphere.radius <= 0) {
+          disposeGroup(root)
+          throw new Error('Invalid spacecraft model bounds')
+        }
+        const scale = radius / sphere.radius
+        root.scale.multiplyScalar(scale)
+        root.position.addScaledVector(sphere.center, -scale)
+        fallback.removeFromParent()
+        disposeGroup(fallback)
+        holder.add(root)
+        holder.rotation.set(0.24, -0.65, 0.12)
+        holder.userData.modelReady = true
+        holder.userData.modelState = 'ready'
+        if (this.selected.id === object.id) {
+          this.renderer.domElement.dataset.modelObject = object.id
+          this.renderer.domElement.dataset.modelState = 'ready'
+        }
+      })
+      .catch(() => {
+        if (this.disposed || holder.userData.disposed) return
+        this.modelData.delete(model.path)
+        holder.userData.modelState = 'failed'
+        if (this.selected.id === object.id)
+          this.renderer.domElement.dataset.modelState = 'failed'
+        this.host.dispatchEvent(
+          new CustomEvent('asset-error', {
+            detail:
+              'The NASA spacecraft model could not be loaded. Its position remains available; a marker is shown instead.',
+          }),
+        )
+      })
+    return holder
   }
 
   private particles(
@@ -510,6 +662,7 @@ export class SpaceScene {
       uniforms: {
         glowColor: { value: new THREE.Color(color) },
         strength: { value: strength },
+        sunDirection: { value: new THREE.Vector3(-5, 3, 5).normalize() },
       },
       vertexShader: `
         varying vec3 vNormal;
@@ -524,11 +677,20 @@ export class SpaceScene {
       fragmentShader: `
         uniform vec3 glowColor;
         uniform float strength;
+        uniform vec3 sunDirection;
         varying vec3 vNormal;
         varying vec3 vPosition;
         void main() {
-          float rim = pow(1.0 - abs(dot(normalize(vNormal), normalize(-vPosition))), 3.8);
-          gl_FragColor = vec4(glowColor, rim * strength);
+          vec3 normal = normalize(vNormal), sight = normalize(-vPosition);
+          float rim = pow(1.0 - abs(dot(normal, sight)), 3.8);
+          float illumination = smoothstep(-0.2, 0.45, dot(normal, sunDirection));
+          float scatteringAngle = dot(sight, sunDirection);
+          float rayleigh = 0.75 * (1.0 + scatteringAngle * scatteringAngle);
+          float mie = 0.12 / pow(max(0.08, 1.49 - 1.4 * scatteringAngle), 1.5);
+          vec3 light = glowColor * rayleigh + vec3(0.75, 0.57, 0.36) * mie;
+          gl_FragColor = vec4(light, rim * strength * (0.035 + illumination * 0.965));
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
         }
       `,
       side: THREE.BackSide,
@@ -536,7 +698,16 @@ export class SpaceScene {
       transparent: true,
       depthWrite: false,
     })
-    return new THREE.Mesh(new THREE.SphereGeometry(radius, 72, 48), material)
+    const shell = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 72, 48),
+      material,
+    )
+    shell.onBeforeRender = () =>
+      material.uniforms.sunDirection.value
+        .set(-5, 3, 5)
+        .normalize()
+        .transformDirection(this.camera.matrixWorldInverse)
+    return shell
   }
 
   private moonTexture(object: CelestialObject) {
@@ -607,6 +778,7 @@ export class SpaceScene {
   }
 
   private planet(object: CelestialObject, radius: number, detailed = false) {
+    if (object.kind === 'rogue-planet') return this.roguePlanet(object, radius)
     const group = new THREE.Group()
     const surfaceMap = object.texture
       ? this.texture(object.texture)
@@ -656,8 +828,17 @@ export class SpaceScene {
       clouds.rotation.y = surface.rotation.y
       group.add(clouds, this.atmosphere(radius * 1.025, '#7bbcff', 0.72))
       this.rotating.push({ node: clouds, hours: 24.3, base: clouds.rotation.y })
-    } else if (detailed && ['venus', 'neptune', 'uranus'].includes(object.id)) {
-      group.add(this.atmosphere(radius * 1.02, object.color, 0.28))
+    } else if (
+      detailed &&
+      ['venus', 'neptune', 'uranus', 'titan'].includes(object.id)
+    ) {
+      group.add(
+        this.atmosphere(
+          radius * (object.id === 'titan' ? 1.06 : 1.02),
+          object.color,
+          object.id === 'titan' ? 0.65 : 0.28,
+        ),
+      )
     }
     if (object.id === 'saturn') {
       const ringGeometry = new THREE.RingGeometry(
@@ -686,6 +867,59 @@ export class SpaceScene {
       group.add(rings)
       group.rotation.z = -0.38
       group.rotation.x = 0.27
+      const toPlanet = { value: new THREE.Matrix4() }
+      const sunDirection = { value: new THREE.Vector3() }
+      const ringMap = { value: this.texture('/textures/saturn-ring.png') }
+      const installShadow = (target: THREE.Mesh, ring: boolean) => {
+        const surfaceMaterial = target.material as THREE.MeshPhongMaterial
+        surfaceMaterial.customProgramCacheKey = () =>
+          ring ? 'saturn-ring-shadow-v1' : 'saturn-surface-shadow-v1'
+        surfaceMaterial.onBeforeCompile = (shader) => {
+          shader.uniforms.uToPlanet = toPlanet
+          shader.uniforms.uRingSun = sunDirection
+          shader.uniforms.uBodyRadius = { value: radius }
+          shader.uniforms.uRingMap = ringMap
+          shader.vertexShader =
+            `uniform mat4 uToPlanet; uniform float uBodyRadius; varying vec3 vPlanetPosition;\n${shader.vertexShader}`.replace(
+              '#include <project_vertex>',
+              '#include <project_vertex>\nvPlanetPosition = (uToPlanet * modelMatrix * vec4(transformed, 1.0)).xyz / uBodyRadius;',
+            )
+          shader.fragmentShader =
+            `uniform vec3 uRingSun; uniform sampler2D uRingMap; varying vec3 vPlanetPosition;\n${shader.fragmentShader}`.replace(
+              '#include <opaque_fragment>',
+              ring
+                ? `
+            float along = dot(vPlanetPosition, uRingSun);
+            float chord = along * along - dot(vPlanetPosition, vPlanetPosition) + 1.0;
+            float shadow = (along < 0.0 ? smoothstep(0.0, 0.025, chord) : 0.0);
+            outgoingLight *= 1.0 - shadow * 0.92;
+            #include <opaque_fragment>
+          `
+                : `
+            float crossing = -vPlanetPosition.y / (abs(uRingSun.y) < 0.0001 ? 0.0001 : uRingSun.y);
+            vec3 hit = vPlanetPosition + uRingSun * crossing;
+            float ringRadius = length(hit.xz);
+            float shadow = 0.0;
+            if (crossing > 0.001 && ringRadius > 1.24 && ringRadius < 2.3) {
+              vec4 density = texture2D(uRingMap, vec2((ringRadius - 1.24) / 1.06, 0.5));
+              shadow = density.a * smoothstep(1.24, 1.27, ringRadius) * (1.0 - smoothstep(2.27, 2.3, ringRadius));
+            }
+            outgoingLight *= 1.0 - shadow * 0.7;
+            #include <opaque_fragment>
+          `,
+            )
+        }
+        target.onBeforeRender = () => {
+          toPlanet.value.copy(group.matrixWorld).invert()
+          sunDirection.value
+            .set(-5, 3, 5)
+            .normalize()
+            .transformDirection(toPlanet.value)
+        }
+      }
+      installShadow(rings, true)
+      installShadow(surface, false)
+      this.renderer.domElement.dataset.saturnShadows = 'planet-and-rings'
     } else {
       group.rotation.z = object.id === 'uranus' ? -1.7 : -0.12
     }
@@ -1236,6 +1470,273 @@ export class SpaceScene {
     this.activeDetail = { id: object.id, node, orbit }
   }
 
+  private buildSky() {
+    this.starfield.visible = false
+    this.skyLayer = new THREE.Group()
+    this.content.add(this.skyLayer)
+    this.lastSkyTime = -Infinity
+    const ground = new THREE.Mesh(
+      new THREE.SphereGeometry(
+        95,
+        64,
+        32,
+        0,
+        Math.PI * 2,
+        Math.PI / 2,
+        Math.PI / 2,
+      ),
+      new THREE.MeshBasicMaterial({ color: '#0c1617', side: THREE.BackSide }),
+    )
+    this.content.add(ground)
+    const horizon = Array.from({ length: 181 }, (_, index) =>
+      new THREE.Vector3(...horizontalDirection(index * 2, 0)).multiplyScalar(
+        90,
+      ),
+    )
+    this.content.add(
+      new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(horizon),
+        new THREE.LineBasicMaterial({
+          color: '#65888a',
+          transparent: true,
+          opacity: 0.5,
+        }),
+      ),
+    )
+    for (const [name, azimuth] of [
+      ['N', 0],
+      ['E', 90],
+      ['S', 180],
+      ['W', 270],
+    ] as const) {
+      const marker = new THREE.Object3D()
+      marker.position
+        .fromArray(horizontalDirection(azimuth, 2))
+        .multiplyScalar(85)
+      this.content.add(marker)
+      this.addLabel(name, '', marker, 0)
+    }
+    this.updateSky()
+  }
+
+  private updateSky() {
+    if (!this.skyLayer) return
+    const layer = this.skyLayer
+    const descendants = new Set<THREE.Object3D>()
+    layer.traverse((node) => descendants.add(node))
+    this.labels = this.labels.filter((label) => {
+      if (!descendants.has(label.anchor)) return true
+      label.element.remove()
+      return false
+    })
+    disposeGroup(layer)
+    layer.clear()
+    const site = this.options.observer ?? defaultObserver
+    const date = new Date(this.timestamp)
+    const sun = observerBody(Body.Sun, date, site)
+    const stars = observerStars(extendedData.stars, date, site).filter(
+      (star) => star.altitude >= 0,
+    )
+    const positions: number[] = [],
+      colors: number[] = [],
+      sizes: number[] = []
+    const constellationCenters = new Map<string, THREE.Vector3>()
+    const obscuration = solarObscuration(date, site)
+    const daylight =
+      THREE.MathUtils.smoothstep(sun.altitude, -12, 0) *
+      Math.pow(1 - obscuration, 0.2)
+    this.renderer.setClearColor(
+      new THREE.Color('#05080d').lerp(new THREE.Color('#477b9c'), daylight),
+    )
+    for (const star of stars) {
+      positions.push(...star.direction.map((value) => value * 85))
+      const color = new THREE.Color(stellarColor(star.spectrum))
+      colors.push(color.r, color.g, color.b)
+      sizes.push(Math.max(0.32, 2 - star.magnitude * 0.2))
+      if (!constellationCenters.has(star.constellation))
+        constellationCenters.set(
+          star.constellation,
+          new THREE.Vector3(...star.direction),
+        )
+    }
+    layer.add(this.particles(positions, colors, sizes, 0.95 * (1 - daylight)))
+    if (site.constellations && daylight < 0.7) {
+      for (const [name, direction] of [...constellationCenters].slice(0, 35)) {
+        const anchor = new THREE.Object3D()
+        anchor.position.copy(direction).multiplyScalar(84)
+        layer.add(anchor)
+        this.addLabel(name, '', anchor, 0)
+      }
+    }
+    const bodies = [
+      Body.Sun,
+      Body.Moon,
+      Body.Mercury,
+      Body.Venus,
+      Body.Mars,
+      Body.Jupiter,
+      Body.Saturn,
+      Body.Uranus,
+      Body.Neptune,
+    ]
+    const states = bodies.map((body) => observerBody(body, date, site))
+    const shadow = earthShadow(date, site)
+    for (const state of states) {
+      if (state.altitude < -1) continue
+      const disk =
+        state.body === Body.Sun ||
+        state.body === Body.Moon ||
+        Boolean(this.options.skyFocus)
+      const skyDistance =
+        state.body === Body.Sun
+          ? 80
+          : state.distanceAu < sun.distanceAu
+            ? 79
+            : 81
+      const radiusKm =
+        state.body === Body.Sun
+          ? 695700
+          : state.body === Body.Moon
+            ? 1737.4
+            : (objectById.get(state.body.toLowerCase())?.radiusKm ?? 1)
+      const radius = disk
+        ? (skyDistance * radiusKm) / (state.distanceAu * 149597870.7)
+        : 0.14
+      const nearSun =
+        state.body !== Body.Sun &&
+        state.distanceAu < sun.distanceAu &&
+        new THREE.Vector3(...state.direction).dot(
+          new THREE.Vector3(...sun.direction),
+        ) > 0.995
+      const material =
+        state.body === Body.Moon && !nearSun
+          ? new THREE.ShaderMaterial({
+              uniforms: {
+                uMap: { value: this.texture('/textures/moon.jpg') },
+                uShadowDirection: {
+                  value: new THREE.Vector3(
+                    ...(shadow?.direction ?? [0, -1, 0]),
+                  ),
+                },
+                uUmbra: { value: shadow?.umbraRadians ?? 0 },
+                uPenumbra: { value: shadow?.penumbraRadians ?? 0 },
+                uSun: {
+                  value: new THREE.Vector3(...sun.direction)
+                    .multiplyScalar(sun.distanceAu)
+                    .sub(
+                      new THREE.Vector3(...state.direction).multiplyScalar(
+                        state.distanceAu,
+                      ),
+                    )
+                    .normalize(),
+                },
+              },
+              vertexShader:
+                'varying vec2 vUv; varying vec3 vDirection,vNormal; void main(){ vUv=uv; vec4 world=modelMatrix*vec4(position,1.0); vDirection=world.xyz; vNormal=mat3(modelMatrix)*normal; gl_Position=projectionMatrix*viewMatrix*world; }',
+              fragmentShader: `uniform sampler2D uMap; uniform vec3 uShadowDirection,uSun; uniform float uUmbra,uPenumbra; varying vec2 vUv; varying vec3 vDirection,vNormal; void main(){float angle=acos(clamp(dot(normalize(vDirection),normalize(uShadowDirection)),-1.0,1.0)); float umbra=uUmbra>0.0?1.0-smoothstep(uUmbra-0.0001,uUmbra+0.0001,angle):0.0; float penumbra=uPenumbra>0.0?1.0-smoothstep(uUmbra,uPenumbra,angle):0.0; vec3 light=texture2D(uMap,vUv).rgb*(0.03+max(0.0,dot(normalize(vNormal),uSun))); light*=mix(vec3(1.0),vec3(0.3,0.065,0.035),umbra); light*=1.0-penumbra*0.3; gl_FragColor=vec4(light,1.0);
+#include <tonemapping_fragment>
+#include <colorspace_fragment>
+}`,
+            })
+          : new THREE.MeshBasicMaterial({
+              color: nearSun
+                ? '#000000'
+                : state.body === Body.Sun
+                  ? '#fff1c4'
+                  : '#dbcea2',
+              map:
+                state.body === Body.Sun
+                  ? this.texture('/textures/sun.jpg')
+                  : null,
+            })
+      const body = new THREE.Mesh(
+        new THREE.SphereGeometry(radius, 32, 24),
+        material,
+      )
+      body.position.fromArray(state.direction).multiplyScalar(skyDistance)
+      layer.add(body)
+      if (state.body === Body.Sun && obscuration > 0.95) {
+        const corona = new THREE.Mesh(
+          new THREE.PlaneGeometry(radius * 6, radius * 6),
+          new THREE.ShaderMaterial({
+            uniforms: {
+              uVisibility: {
+                value: THREE.MathUtils.smoothstep(obscuration, 0.95, 1),
+              },
+            },
+            vertexShader:
+              'varying vec2 vUv; void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+            fragmentShader:
+              'uniform float uVisibility; varying vec2 vUv; void main(){float radius=length(vUv-0.5)*6.0; float glow=exp(-max(0.0,radius-1.0)*3.0)*smoothstep(0.98,1.05,radius);gl_FragColor=vec4(0.75,0.82,0.88,glow*uVisibility*0.5);}',
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        )
+        corona.position.copy(body.position)
+        corona.lookAt(this.camera.position)
+        layer.add(corona)
+      }
+      this.addLabel(state.body, state.body.toLowerCase(), body, 12)
+    }
+    this.renderer.domElement.dataset.skyBodies = JSON.stringify(
+      states.map(({ body, altitude, azimuth }) => ({
+        body,
+        altitude,
+        azimuth,
+      })),
+    )
+    this.renderer.domElement.dataset.skyStars = String(stars.length)
+    this.renderer.domElement.dataset.skySite = `${site.latitude},${site.longitude}`
+    this.renderer.domElement.dataset.solarObscuration = String(obscuration)
+    this.renderer.domElement.dataset.lunarUmbra = String(shadow?.umbraRadians ?? 0)
+    this.renderer.domElement.dataset.skyFocus = this.options.skyFocus ?? ''
+    this.renderer.domElement.dataset.skyAngularRadii = JSON.stringify(
+      states.map((state) => ({
+        body: state.body,
+        radians:
+          (state.body === Body.Sun
+            ? 695700
+            : state.body === Body.Moon
+              ? 1737.4
+              : (objectById.get(state.body.toLowerCase())?.radiusKm ?? 1)) /
+          (state.distanceAu * 149597870.7),
+      })),
+    )
+    this.lastSkyTime = this.timestamp
+  }
+
+  private buildComparison() {
+    const objects = (this.options.comparison ?? ['earth', 'jupiter', 'sun'])
+      .map((id) => objectById.get(id))
+      .filter((object): object is CelestialObject => Boolean(object))
+    const layout = comparisonLayout(objects)
+    this.fitRadius = Math.max(
+      3,
+      ...layout.map((item) => Math.abs(item.center) + item.radius),
+    )
+    for (const item of layout) {
+      const object = objectById.get(item.id)!
+      const body = object.blackHole
+        ? new THREE.Mesh(
+            new THREE.SphereGeometry(item.radius, 64, 40),
+            new THREE.MeshBasicMaterial({ color: '#020405' }),
+          )
+        : object.kind === 'star'
+          ? this.star(object, item.radius)
+          : this.planet(object, item.radius, true)
+      body.position.set(item.center, item.radius - 2, 0)
+      this.content.add(body)
+      const anchor = new THREE.Object3D()
+      anchor.position.set(item.center, -2.25, 0)
+      this.content.add(anchor)
+      this.addLabel(object.name, object.id, anchor, 0)
+    }
+    this.renderer.domElement.dataset.comparisonRadii = JSON.stringify(
+      layout.map(({ id, radius, radiusKm }) => ({ id, radius, radiusKm })),
+    )
+  }
+
   private buildSystem(object: CelestialObject, single: boolean) {
     const isMoon = object.kind === 'moon'
     const primary = isMoon
@@ -1254,7 +1755,7 @@ export class SpaceScene {
     })
     this.addLabel(primary.name, primary.id, central, 20)
     const bodies = single ? [object] : solarPlanets
-    this.fitRadius = single ? 7.8 : 14.2
+    this.fitRadius = object.trajectory ? 5 : single ? 7.8 : 14.2
     this.orbitPerspective = true
     const date = new Date(this.timestamp)
     bodies.forEach((planet) => {
@@ -1262,25 +1763,35 @@ export class SpaceScene {
         ? 6 /
           Math.max(
             0.001,
-            Math.abs(
-              planet.orbit.semiMajorAxis ??
-                planet.elements?.perihelionDistance ??
-                1,
-            ),
+            planet.trajectory
+              ? Math.max(
+                  ...sampleOrbit(planet, date).map((point) =>
+                    Math.hypot(...point),
+                  ),
+                )
+              : Math.abs(
+                  planet.orbit.semiMajorAxis ??
+                    planet.elements?.perihelionDistance ??
+                    1,
+                ),
           )
         : this.options.compressed
           ? 1
           : 0.42
       const compressed = !single && this.options.compressed
       const radius = single
-        ? 0.24
+        ? planet.trajectory
+          ? 0.45
+          : 0.24
         : ['jupiter', 'saturn'].includes(planet.id)
           ? 0.23
           : 0.11
       const model =
-        planet.kind === 'comet'
-          ? this.comet(planet, radius * 0.25)
-          : this.planet(planet, radius, true)
+        planet.kind === 'spacecraft'
+          ? this.spacecraft(planet, radius)
+          : planet.kind === 'comet'
+            ? this.comet(planet, radius * 0.25)
+            : this.planet(planet, radius, true)
       this.mapNodes.set(planet.id, { node: model, radius })
       const position = displayPosition(getPosition(planet, date), compressed)
       model.position.fromArray(position).multiplyScalar(scale)
@@ -1337,6 +1848,7 @@ export class SpaceScene {
           ).normalize(),
         },
         uActiveNucleus: { value: activeNucleus ? 1 : 0 },
+        uAccreting: { value: 1 },
         uSpaceInverse: { value: new THREE.Matrix4() },
       },
       defines: { RAY_STEPS: this.options.highQuality ? 120 : 88 },
@@ -1348,7 +1860,7 @@ export class SpaceScene {
         }
       `,
       fragmentShader: `
-        uniform float uTime, uActiveNucleus;
+        uniform float uTime, uActiveNucleus, uAccreting;
         uniform vec3 uColor, uDiskNormal;
         uniform mat4 uSpaceInverse;
         varying vec3 vWorld;
@@ -1423,7 +1935,7 @@ export class SpaceScene {
             vec3 nextDirection = direction + (acceleration + bending(nextPosition, angularMomentum)) * stepSize * 0.5;
             float previousHeight = dot(position, uDiskNormal);
             float nextHeight = dot(nextPosition, uDiskNormal);
-            if (previousHeight * nextHeight < 0.0) {
+            if (uAccreting > 0.5 && previousHeight * nextHeight < 0.0) {
               float fraction = previousHeight / (previousHeight - nextHeight);
               vec3 hit = mix(position, nextPosition, fraction);
               float hitRadius = length(hit);
@@ -1441,8 +1953,19 @@ export class SpaceScene {
           float critical = horizon * 2.598076;
           float photonWidth = max(fwidth(impact) * 1.25, 0.016);
           float photonGlow = exp(-pow((impact - critical) / photonWidth, 2.0));
-          radiance += vec3(1.0, 0.72, 0.39) * photonGlow * 0.025;
-          float alpha = captured ? 1.0 : max(1.0 - transmission, photonGlow * 0.06);
+          radiance += mix(vec3(0.55, 0.66, 0.8), vec3(1.0, 0.72, 0.39), uAccreting) * photonGlow * 0.025;
+          float backgroundAlpha = 0.0;
+          if (uAccreting < 0.5 && !captured) {
+            vec3 sight = normalize(direction);
+            vec2 sky = vec2(atan(sight.z, sight.x) / 6.283185 + 0.5, asin(clamp(sight.y, -1.0, 1.0)) / 3.141593 + 0.5) * vec2(240.0, 120.0);
+            vec2 cell = floor(sky);
+            vec2 offset = fract(sky) - vec2(0.2 + hash(cell + 9.0) * 0.6, 0.2 + hash(cell + 17.0) * 0.6);
+            float width = max(0.08, length(fwidth(sky)) * 0.45);
+            float starlight = exp(-dot(offset, offset) / (width * width)) * smoothstep(0.89, 0.99, hash(cell));
+            radiance += mix(vec3(0.62, 0.76, 1.0), vec3(1.0, 0.86, 0.66), hash(cell + 23.0)) * starlight;
+            backgroundAlpha = starlight;
+          }
+          float alpha = captured ? 1.0 : max(max(1.0 - transmission, photonGlow * 0.06), backgroundAlpha);
           if (alpha < 0.001) discard;
           gl_FragColor = vec4(radiance / max(alpha, 0.001), alpha);
           #include <tonemapping_fragment>
@@ -1508,14 +2031,22 @@ export class SpaceScene {
   }
 
   private buildBlackHole(object: CelestialObject) {
-    this.fitRadius = object.kind === 'quasar' ? 5.1 : 4.85
+    const accreting = object.blackHole?.accreting !== false
+    this.fitRadius = !accreting ? 1.65 : object.kind === 'quasar' ? 5.1 : 4.85
     const group = new THREE.Group()
     group.name = 'black-hole-lensing'
     const image = new THREE.Mesh(
       new THREE.PlaneGeometry(11, 11),
       this.blackHoleMaterial(object.color, object.kind === 'quasar'),
     )
-    image.name = 'ray-bent-accretion-disk'
+    image.material.uniforms.uAccreting.value = accreting ? 1 : 0
+    image.name = accreting
+      ? 'ray-bent-accretion-disk'
+      : 'dormant-black-hole-shadow'
+    if (this.selected.id === object.id)
+      this.renderer.domElement.dataset.blackHoleState = accreting
+        ? 'accreting'
+        : 'dormant'
     image.onBeforeRender = () => {
       image.material.uniforms.uSpaceInverse.value
         .copy(group.matrixWorld)
@@ -1525,7 +2056,12 @@ export class SpaceScene {
     image.renderOrder = 3
     group.add(image)
     this.billboards.push(image)
-    if (object.kind === 'quasar' || object.id === 'm87-black-hole') {
+    if (
+      accreting &&
+      (object.kind === 'quasar' ||
+        object.id === 'm87-black-hole' ||
+        object.blackHole?.jets)
+    ) {
       const jets = new THREE.Group()
       jets.add(this.beam('#b1dfff', 7, 0.55))
       const opposite = this.beam('#b1dfff', 7, 0.55)
@@ -1538,7 +2074,53 @@ export class SpaceScene {
     this.content.add(group)
   }
 
+  private roguePlanet(object: CelestialObject, radius: number) {
+    const material = new THREE.ShaderMaterial({
+      uniforms: { uColor: { value: new THREE.Color(object.color) } },
+      vertexShader: `
+        varying vec3 vPosition, vNormal, vSight;
+        void main() {
+          vPosition = normalize(position);
+          vNormal = normalize(normalMatrix * normal);
+          vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+          vSight = normalize(-viewPosition.xyz);
+          gl_Position = projectionMatrix * viewPosition;
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uColor;
+        varying vec3 vPosition, vNormal, vSight;
+        float hash(vec3 point) { return fract(sin(dot(point, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+        float noise(vec3 point) {
+          vec3 cell = floor(point), local = fract(point);
+          local = local * local * (3.0 - 2.0 * local);
+          return mix(mix(mix(hash(cell), hash(cell + vec3(1,0,0)), local.x), mix(hash(cell + vec3(0,1,0)), hash(cell + vec3(1,1,0)), local.x), local.y), mix(mix(hash(cell + vec3(0,0,1)), hash(cell + vec3(1,0,1)), local.x), mix(hash(cell + vec3(0,1,1)), hash(cell + vec3(1,1,1)), local.x), local.y), local.z);
+        }
+        void main() {
+          vec3 point = normalize(vPosition);
+          float broad = noise(point * 6.0);
+          float clouds = noise(point * 23.0 + broad * 3.0) * 0.65 + noise(point * 65.0) * 0.35;
+          float bands = sin(point.y * 55.0 + broad * 8.0 + clouds * 2.5) * 0.5 + 0.5;
+          vec3 shade = mix(uColor * 0.3, mix(uColor, vec3(0.65, 0.55, 0.47), 0.2), bands * 0.7 + clouds * 0.3);
+          float limb = pow(max(dot(normalize(vNormal), normalize(vSight)), 0.0), 0.45);
+          gl_FragColor = vec4(shade * (0.25 + limb * 0.75), 1.0);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }
+      `,
+    })
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 80, 56),
+      material,
+    )
+    sphere.userData.objectId = object.id
+    const group = new THREE.Group()
+    group.add(sphere)
+    return group
+  }
+
   private buildNebula(object: CelestialObject) {
+    if (object.model?.format === 'particles') return this.buildPillars(object)
     this.fitRadius = 4.5
     const random = seededRandom(hashId(object.id))
     const positions: number[] = []
@@ -1549,7 +2131,12 @@ export class SpaceScene {
       object.id === 'carina' ? '#88bfc9' : '#759ed2',
     )
     const color = new THREE.Color()
-    const shell = object.scene === 'supernova' || object.id === 'helix'
+    const shell =
+      object.scene === 'supernova' ||
+      object.id === 'helix' ||
+      object.morphology === 'shell'
+    const bipolar = object.morphology === 'bipolar'
+    const noise = new ImprovedNoise()
     for (let index = 0; index < 14500; index++) {
       const azimuth = random() * Math.PI * 2
       const vertical = random() * 2 - 1
@@ -1558,9 +2145,22 @@ export class SpaceScene {
         : Math.pow(random(), 0.65) * 4
       const circular = Math.sqrt(1 - vertical * vertical)
       const wobble = 1 + Math.sin(azimuth * 5 + vertical * 8) * 0.22
-      const horizontal = Math.cos(azimuth) * radial * circular * wobble
-      const altitude = vertical * radial * (shell ? 0.78 : 0.55)
-      const depth = Math.sin(azimuth) * radial * circular * 0.65
+      let horizontal = Math.cos(azimuth) * radial * circular * wobble
+      let altitude = vertical * radial * (shell ? 0.78 : 0.55)
+      let depth = Math.sin(azimuth) * radial * circular * 0.65
+      if (bipolar) {
+        const lobe = Math.abs(vertical)
+        const width = 0.2 + Math.sin(lobe * Math.PI) * 1.4
+        horizontal = Math.cos(azimuth) * width * (0.7 + random() * 0.3)
+        altitude = vertical * 3.8
+        depth = Math.sin(azimuth) * width * 0.65
+      }
+      if (
+        object.morphology === 'filaments' &&
+        Math.abs(noise.noise(horizontal * 1.5, altitude * 1.5, depth * 1.5)) >
+          0.095
+      )
+        continue
       positions.push(
         horizontal,
         altitude + (shell ? 0 : Math.sin(horizontal * 1.2) * 0.7),
@@ -1571,12 +2171,21 @@ export class SpaceScene {
         .copy(primary)
         .lerp(secondary, mix)
         .multiplyScalar(0.28 + random() * 0.45)
+      if (object.id === 'sn1006')
+        color.multiplyScalar(
+          0.22 + Math.pow(Math.abs(horizontal) / 3.7, 2) * 1.6,
+        )
       colors.push(color.r, color.g, color.b)
-      sizes.push(0.22 + random() * 0.47)
+      sizes.push(
+        object.morphology ? 0.075 + random() * 0.12 : 0.22 + random() * 0.47,
+      )
     }
-    const cloud = this.particles(positions, colors, sizes, shell ? 0.09 : 0.058)
+    const cloud = object.morphology
+      ? this.volumeParticles(positions, colors, sizes, shell ? 0.085 : 0.045)
+      : this.particles(positions, colors, sizes, shell ? 0.09 : 0.058)
     this.content.add(cloud)
-    this.rotating.push({ node: cloud, speed: 0.009, base: 0 })
+    if (!object.morphology)
+      this.rotating.push({ node: cloud, speed: 0.009, base: 0 })
     const starPositions: number[] = []
     const starColors: number[] = []
     const starSizes: number[] = []
@@ -1599,6 +2208,131 @@ export class SpaceScene {
       this.content.add(core)
       this.addLabel('Crab Pulsar', 'crab-pulsar', core)
     }
+  }
+
+  private volumeParticles(
+    positions: number[],
+    colors: number[],
+    sizes: number[],
+    opacity: number,
+  ) {
+    const cloud = this.particles(positions, colors, sizes, opacity)
+    cloud.material.uniforms.uViewportHeight = { value: this.host.clientHeight }
+    cloud.material.vertexShader = `
+      attribute float aSize;
+      varying vec3 vColor;
+      varying float vVisibility;
+      uniform float uPixelRatio, uViewportHeight;
+      void main() {
+        vColor = color;
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        float worldScale = length(modelMatrix[0].xyz);
+        float size = aSize * worldScale * projectionMatrix[1][1] * uViewportHeight * 0.5 / max(-viewPosition.z, 0.0001);
+        vVisibility = pow(min(1.0, size / 1.2), 2.0) * smoothstep(0.0, aSize * worldScale, -viewPosition.z);
+        gl_PointSize = clamp(size, 1.2, 90.0) * uPixelRatio;
+        gl_Position = projectionMatrix * viewPosition;
+      }
+    `
+    cloud.material.fragmentShader = `
+      varying vec3 vColor;
+      varying float vVisibility;
+      uniform float uOpacity;
+      void main() {
+        float radius = length(gl_PointCoord - 0.5) * 2.0;
+        if (radius > 1.0) discard;
+        float glow = exp(-radius * radius * 5.0) * (1.0 - smoothstep(0.7, 1.0, radius));
+        gl_FragColor = vec4(vColor, glow * uOpacity * vVisibility);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `
+    cloud.onBeforeRender = () => {
+      cloud.material.uniforms.uPixelRatio.value = this.renderer.getPixelRatio()
+      cloud.material.uniforms.uViewportHeight.value = this.host.clientHeight
+    }
+    return cloud
+  }
+
+  private buildPillars(object: CelestialObject) {
+    this.fitRadius = 4.3
+    const holder = new THREE.Group()
+    holder.name = 'nasa-pillars-volume'
+    holder.userData.modelState = 'loading'
+    const fallback = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.4),
+      new THREE.MeshBasicMaterial({ color: object.color, wireframe: true }),
+    )
+    holder.add(fallback)
+    this.content.add(holder)
+    if (this.selected.id === object.id) {
+      this.renderer.domElement.dataset.modelState = 'loading'
+      this.renderer.domElement.dataset.modelObject = object.id
+    }
+    void this.loadModelData(object.model!.path)
+      .then((buffer) => {
+        if (this.disposed || holder.userData.disposed) return
+        const data = JSON.parse(new TextDecoder().decode(buffer)) as {
+          positions: number[]
+          illumination: number[]
+        }
+        if (
+          !Array.isArray(data.positions) ||
+          !Array.isArray(data.illumination) ||
+          data.positions.length !== data.illumination.length * 3 ||
+          data.illumination.length < 1000 ||
+          data.illumination.length > 100000 ||
+          !data.positions.every(
+            (value) => Number.isFinite(value) && Math.abs(value) <= 16,
+          ) ||
+          !data.illumination.every(
+            (value) => Number.isFinite(value) && value >= 0 && value <= 255,
+          )
+        )
+          throw new Error('Invalid nebula model')
+        const positions: number[] = [],
+          colors: number[] = [],
+          sizes: number[] = []
+        const random = seededRandom(10748)
+        const color = new THREE.Color()
+        const shadow = new THREE.Color('#52666c')
+        const lit = new THREE.Color('#dbba8c')
+        const stride = this.options.highQuality ? 1 : 2
+        for (let index = 0; index < data.illumination.length; index += stride) {
+          positions.push(...data.positions.slice(index * 3, index * 3 + 3))
+          color
+            .copy(shadow)
+            .lerp(lit, Math.pow(data.illumination[index] / 255, 1.4))
+          colors.push(color.r, color.g, color.b)
+          sizes.push(0.045 + random() * 0.08)
+        }
+        const cloud = this.volumeParticles(positions, colors, sizes, 0.62)
+        cloud.material.blending = THREE.NormalBlending
+        cloud.rotation.set(-0.15, -1.1, -0.12)
+        fallback.removeFromParent()
+        disposeGroup(fallback)
+        holder.add(cloud)
+        holder.userData.modelReady = true
+        holder.userData.modelState = 'ready'
+        holder.userData.modelParticles = sizes.length
+        if (this.selected.id === object.id) {
+          this.renderer.domElement.dataset.modelState = 'ready'
+          this.renderer.domElement.dataset.modelObject = object.id
+          this.renderer.domElement.dataset.modelParticles = String(sizes.length)
+        }
+      })
+      .catch(() => {
+        if (this.disposed || holder.userData.disposed) return
+        this.modelData.delete(object.model!.path)
+        holder.userData.modelState = 'failed'
+        if (this.selected.id === object.id)
+          this.renderer.domElement.dataset.modelState = 'failed'
+        this.host.dispatchEvent(
+          new CustomEvent('asset-error', {
+            detail:
+              'The NASA nebula geometry could not be loaded. Its catalog position remains available; a marker is shown instead.',
+          }),
+        )
+      })
   }
 
   private buildPulsar(object: CelestialObject) {
@@ -1686,39 +2420,132 @@ export class SpaceScene {
     sizes: number[],
     opacity: number,
     diffuse = false,
+    referenceOnly = false,
   ) {
     const points = this.particles(positions, colors, sizes, opacity)
+    const referenceColors: number[] = []
+    const referenceSizes: number[] = []
+    const referenceRandom = seededRandom(diffuse ? 9127 : 9126)
+    const neutral = new THREE.Color('#cdd7e5')
+    const golden = new THREE.Color('#edca81')
+    const amber = new THREE.Color('#d3a27a')
+    const blue = new THREE.Color('#7eacd1')
+    const stellarColor = new THREE.Color()
+    for (let index = 0; index < sizes.length; index++) {
+      const offset = index * 3
+      const radial = Math.hypot(positions[offset], positions[offset + 2])
+      const bulge = Math.exp(-radial * radial * 0.45)
+      const population = referenceRandom()
+      if (diffuse) stellarColor.copy(blue).lerp(golden, bulge * 0.95)
+      else
+        stellarColor.copy(
+          population < 0.06
+            ? amber
+            : population < 0.12 + bulge * 0.58
+              ? golden
+              : population < 0.6
+                ? neutral
+                : blue,
+        )
+      stellarColor.multiplyScalar(
+        Math.max(colors[offset], colors[offset + 1], colors[offset + 2]) *
+          (0.9 + referenceRandom() * 0.2),
+      )
+      referenceColors.push(stellarColor.r, stellarColor.g, stellarColor.b)
+      referenceSizes.push(
+        sizes[index] * (diffuse ? (referenceOnly ? 1 : 1.8) : 1.05),
+      )
+    }
+    points.geometry.setAttribute(
+      'aReferenceColor',
+      new THREE.Float32BufferAttribute(referenceColors, 3),
+    )
+    points.geometry.setAttribute(
+      'aReferenceSize',
+      new THREE.Float32BufferAttribute(referenceSizes, 1),
+    )
     points.material.uniforms.uViewportHeight = { value: this.host.clientHeight }
     points.material.uniforms.uDiffuse = { value: diffuse ? 1 : 0 }
+    points.material.uniforms.uReferenceStyle = {
+      value: this.options.galaxyStyle === 'reference' ? 1 : 0,
+    }
+    points.material.uniforms.uReferenceOnly = { value: referenceOnly ? 1 : 0 }
+    points.material.uniforms.uInterior = { value: 0 }
+    points.material.uniforms.uDustMap = { value: null }
+    points.material.uniforms.uDustStrength = { value: 0 }
+    points.material.uniforms.uDustSteps = { value: 8 }
+    points.material.uniforms.uObserver = { value: new THREE.Vector3() }
+    points.userData.referenceOnly = referenceOnly
+    points.visible = !referenceOnly || this.options.galaxyStyle === 'reference'
     points.material.vertexShader = `
-      attribute float aSize;
+      attribute float aSize, aReferenceSize;
+      attribute vec3 aReferenceColor;
       varying vec3 vColor;
+      varying vec3 vTransmission;
       varying float vVisibility;
-      uniform float uPixelRatio, uViewportHeight, uDiffuse;
+      uniform float uPixelRatio, uViewportHeight, uDiffuse, uReferenceStyle, uReferenceOnly, uInterior;
+      uniform sampler2D uDustMap;
+      uniform float uDustStrength, uDustSteps;
+      uniform vec3 uObserver;
+      vec3 dustTransmission(vec3 source) {
+        if (uDustStrength < 0.001) return vec3(1.0);
+        vec3 difference = uObserver - source;
+        float distance = length(difference);
+        vec3 direction = difference / max(distance, 0.0001);
+        vec3 safeDirection = mix(vec3(-1.0), vec3(1.0), step(vec3(0.0), direction)) * max(abs(direction), vec3(0.0001));
+        vec3 bounds = vec3(5.8, 0.38, 5.8);
+        vec3 first = (-bounds - source) / safeDirection;
+        vec3 second = (bounds - source) / safeDirection;
+        vec3 near = min(first, second), far = max(first, second);
+        float entry = max(0.0, max(near.x, max(near.y, near.z)));
+        float exit = min(distance, min(far.x, min(far.y, far.z)));
+        if (exit <= entry) return vec3(1.0);
+        float stepLength = (exit - entry) / uDustSteps;
+        float opticalDepth = 0.0;
+        for (int index = 0; index < 8; index++) {
+          if (float(index) >= uDustSteps) break;
+          vec3 point = source + direction * (entry + (float(index) + 0.5) * stepLength);
+          float radial = length(point.xz);
+          float warp = sin(atan(point.z, point.x) * 2.0 + radial) * pow(radial / 5.75, 2.0) * 0.1;
+          float altitude = (point.y - warp) / (0.045 + radial * 0.006);
+          float density = texture2D(uDustMap, point.xz / 12.0 + 0.5).r;
+          density *= exp(-altitude * altitude) * (1.0 - smoothstep(4.8, 5.75, radial)) * smoothstep(0.3, 0.9, radial);
+          opticalDepth += density * stepLength * 5.5;
+        }
+        return exp(-min(opticalDepth, 1.8) * uDustStrength * vec3(0.7, 0.92, 1.22));
+      }
       void main() {
-        vColor = color;
-        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        vColor = mix(color, aReferenceColor, uReferenceStyle);
+        vec3 stellarPosition = position;
+        float bulge = exp(-dot(position.xz, position.xz) * 0.6);
+        stellarPosition.y *= mix(1.0, 0.6 + bulge * 0.4, uReferenceStyle * (1.0 - uReferenceOnly));
+        vTransmission = dustTransmission(stellarPosition);
+        float size = mix(aSize, aReferenceSize, uReferenceStyle) * mix(1.0, 0.72, uInterior * (1.0 - uDiffuse));
+        vec4 viewPosition = modelViewMatrix * vec4(stellarPosition, 1.0);
         float worldScale = length(modelMatrix[0].xyz);
-        float projectedSize = aSize * worldScale * projectionMatrix[1][1] * uViewportHeight * 0.5 / max(-viewPosition.z, 0.0001);
+        float projectedSize = size * worldScale * projectionMatrix[1][1] * uViewportHeight * 0.5 / max(-viewPosition.z, 0.0001);
         float minimumSize = mix(2.8, 1.5, uDiffuse);
         vVisibility = pow(min(1.0, projectedSize / minimumSize), 2.0) * smoothstep(0.0, aSize * worldScale * 0.8, -viewPosition.z);
-        gl_PointSize = clamp(projectedSize, minimumSize, mix(56.0, 110.0, uDiffuse)) * uPixelRatio;
+        float maximumSize = mix(mix(56.0, 110.0, uDiffuse), mix(30.0, 48.0, uDiffuse), uInterior);
+        gl_PointSize = clamp(projectedSize, minimumSize, maximumSize) * uPixelRatio;
         gl_Position = projectionMatrix * viewPosition;
       }
     `
     points.material.fragmentShader = `
       varying vec3 vColor;
+      varying vec3 vTransmission;
       varying float vVisibility;
-      uniform float uOpacity, uDiffuse;
+      uniform float uOpacity, uDiffuse, uReferenceStyle, uInterior;
       void main() {
         vec2 point = gl_PointCoord - 0.5;
         float radius = length(point) * 2.0;
         if (radius > 1.0) discard;
-        float core = exp(-radius * radius * 65.0);
-        float halo = exp(-radius * radius * 5.0);
-        float profile = mix(core * 1.45 + halo * 0.15, halo, uDiffuse);
+        float core = exp(-radius * radius * mix(65.0, 78.0, uReferenceStyle));
+        float halo = exp(-radius * radius * mix(5.0, 6.0, uReferenceStyle * (1.0 - uDiffuse)));
+        float profile = mix(core * mix(1.45, mix(1.8, 4.2, uInterior), uReferenceStyle) + halo * mix(0.15, mix(0.12, 0.045, uInterior), uReferenceStyle), halo, uDiffuse);
         float edge = 1.0 - smoothstep(0.75, 1.0, radius);
-        vec3 light = mix(vColor, mix(vColor, vec3(1.0), core * 0.1), 1.0 - uDiffuse);
+        vec3 light = mix(vColor, mix(vColor, vec3(1.0), core * mix(0.1, 0.035, uReferenceStyle)), 1.0 - uDiffuse);
+        light *= vTransmission;
         gl_FragColor = vec4(light, min(1.0, profile * uOpacity * vVisibility * edge));
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
@@ -1726,7 +2553,34 @@ export class SpaceScene {
     `
     const normal = new THREE.Vector3()
     const sight = new THREE.Vector3()
+    const observer = new THREE.Vector3()
+    const inverse = new THREE.Matrix4()
     points.onBeforeRender = () => {
+      const reference = this.options.galaxyStyle === 'reference'
+      observer
+        .copy(this.camera.position)
+        .applyMatrix4(inverse.copy(points.matrixWorld).invert())
+      const dustMap = this.textures.get('milky-way-dust')
+      const dusty =
+        reference && this.options.galacticDust !== false && Boolean(dustMap)
+      points.material.uniforms.uObserver.value.copy(observer)
+      points.material.uniforms.uDustMap.value = dustMap ?? null
+      points.material.uniforms.uDustStrength.value = dusty ? 1 : 0
+      points.material.uniforms.uDustSteps.value =
+        this.navigationQuality || !this.options.highQuality ? 4 : 8
+      this.renderer.domElement.dataset.galaxyDust = dusty
+        ? 'enabled'
+        : 'disabled'
+      const interior = reference
+        ? 1 - THREE.MathUtils.smoothstep(observer.length(), 1.5, 7)
+        : 0
+      points.material.uniforms.uInterior.value = interior
+      points.material.uniforms.uReferenceStyle.value = reference ? 1 : 0
+      points.material.blending =
+        reference && diffuse ? THREE.NormalBlending : THREE.AdditiveBlending
+      this.renderer.domElement.dataset.galaxyStyle = reference
+        ? 'reference'
+        : 'original'
       points.material.uniforms.uViewportHeight.value = this.host.clientHeight
       points.material.uniforms.uPixelRatio.value = this.renderer.getPixelRatio()
       normal.set(0, 1, 0).transformDirection(points.matrixWorld)
@@ -1736,7 +2590,10 @@ export class SpaceScene {
         .normalize()
       const alignment = THREE.MathUtils.clamp(Math.abs(normal.dot(sight)), 0, 1)
       points.material.uniforms.uOpacity.value =
-        opacity * (diffuse ? 0.55 : 1) * (0.16 + alignment * 0.84)
+        opacity *
+        (diffuse ? (reference ? 2.4 : 0.55) : reference ? 0.82 : 1) *
+        (reference ? 0.2 + alignment * 0.8 : 0.16 + alignment * 0.84) *
+        (1 - interior * (diffuse ? 0.78 : 0))
       this.renderer.domElement.dataset.galaxyInclination =
         THREE.MathUtils.radToDeg(Math.acos(alignment)).toFixed(2)
     }
@@ -1749,6 +2606,7 @@ export class SpaceScene {
       [
         'messier-87',
         'centaurus-a',
+        'ngc-1275',
         'large-magellanic-cloud',
         'small-magellanic-cloud',
       ].includes(object.id)
@@ -1994,6 +2852,49 @@ export class SpaceScene {
         if (!context) return
         context.drawImage(source, 0, 0, 1024, 1024)
         const pixels = context.getImageData(0, 0, 1024, 1024).data
+        if (!this.textures.has('milky-way-dust')) {
+          const density = new Uint8Array(256 * 256)
+          const intensityAt = (horizontal: number, vertical: number) => {
+            const offset =
+              (THREE.MathUtils.clamp(vertical, 0, 1023) * 1024 +
+                THREE.MathUtils.clamp(horizontal, 0, 1023)) *
+              4
+            return (
+              Math.max(pixels[offset], pixels[offset + 1], pixels[offset + 2]) /
+              255
+            )
+          }
+          for (let vertical = 0; vertical < 256; vertical++) {
+            for (let horizontal = 0; horizontal < 256; horizontal++) {
+              const sampleX = horizontal * 4 + 2
+              const sampleY = vertical * 4 + 2
+              const intensity = intensityAt(sampleX, sampleY)
+              const surrounding =
+                (intensityAt(sampleX - 12, sampleY) +
+                  intensityAt(sampleX + 12, sampleY) +
+                  intensityAt(sampleX, sampleY - 12) +
+                  intensityAt(sampleX, sampleY + 12)) /
+                4
+              density[vertical * 256 + horizontal] = Math.round(
+                255 *
+                  Math.min(
+                    1,
+                    Math.pow(intensity, 0.8) * 0.35 +
+                      Math.max(0, surrounding - intensity) * 2.4,
+                  ),
+              )
+            }
+          }
+          const dustMap = new THREE.DataTexture(
+            density,
+            256,
+            256,
+            THREE.RedFormat,
+          )
+          dustMap.minFilter = dustMap.magFilter = THREE.LinearFilter
+          dustMap.needsUpdate = true
+          this.textures.set('milky-way-dust', dustMap)
+        }
         const imagePositions: number[] = [],
           imageColors: number[] = [],
           imageSizes: number[] = []
@@ -2131,6 +3032,62 @@ export class SpaceScene {
         )
         unresolvedStars.name = 'volumetric-stellar-glow'
         galaxy.add(unresolvedStars)
+        const bulgePositions: number[] = [],
+          bulgeColors: number[] = [],
+          bulgeSizes: number[] = [],
+          bulgeGlowPositions: number[] = [],
+          bulgeGlowColors: number[] = [],
+          bulgeGlowSizes: number[] = []
+        const bulgeRandom = seededRandom(1933)
+        const bulgeCount = this.options.highQuality ? 24000 : 12000
+        const bulgeColor = new THREE.Color('#f5d49b')
+        for (let index = 0; index < bulgeCount; index++) {
+          const azimuth = bulgeRandom() * Math.PI * 2
+          const vertical = bulgeRandom() * 2 - 1
+          const radial = Math.pow(bulgeRandom(), 0.65) * 1.6
+          const spread = Math.sqrt(1 - vertical * vertical)
+          const horizontal = Math.cos(azimuth) * radial * spread
+          const depth = Math.sin(azimuth) * radial * spread * 0.78
+          const position = [
+            horizontal * Math.cos(0.7) - depth * Math.sin(0.7),
+            vertical * radial * 0.42,
+            horizontal * Math.sin(0.7) + depth * Math.cos(0.7),
+          ]
+          bulgePositions.push(...position)
+          const luminosity = 0.42 + bulgeRandom() * 0.45
+          bulgeColors.push(
+            bulgeColor.r * luminosity,
+            bulgeColor.g * luminosity,
+            bulgeColor.b * luminosity,
+          )
+          bulgeSizes.push(0.025 + Math.pow(bulgeRandom(), 4) * 0.065)
+          if (index % 12 === 0) {
+            bulgeGlowPositions.push(...position)
+            bulgeGlowColors.push(bulgeColor.r, bulgeColor.g, bulgeColor.b)
+            bulgeGlowSizes.push(0.24 + bulgeRandom() * 0.2)
+          }
+        }
+        const referenceBulge = this.galaxyParticles(
+          bulgePositions,
+          bulgeColors,
+          bulgeSizes,
+          0.3,
+          false,
+          true,
+        )
+        referenceBulge.name = 'reference-stellar-bulge'
+        referenceBulge.renderOrder = 1
+        galaxy.add(referenceBulge)
+        const bulgeGlow = this.galaxyParticles(
+          bulgeGlowPositions,
+          bulgeGlowColors,
+          bulgeGlowSizes,
+          0.055,
+          true,
+          true,
+        )
+        bulgeGlow.name = 'reference-bulge-starlight'
+        galaxy.add(bulgeGlow)
         galaxy.userData.particleDepth = maximumHeight * 2
         this.renderer.domElement.dataset.galaxyTextureReady = 'true'
         this.renderer.domElement.dataset.galaxyParticleDepth = (
@@ -2140,7 +3097,7 @@ export class SpaceScene {
           imageSizes.length,
         )
       }
-      source.src = '/textures/milky-way-nasa.jpg'
+      source.src = `${import.meta.env.BASE_URL}textures/milky-way-nasa.jpg`
     }
     if (object.id === 'milky-way') {
       const marker = new THREE.Mesh(
@@ -2248,6 +3205,87 @@ export class SpaceScene {
       }
     }
     this.content.add(this.particles(positions, colors, sizes, 0.9))
+  }
+
+  private buildVoid(object: CelestialObject) {
+    this.fitRadius = 7.2
+    const random = seededRandom(hashId(object.id))
+    const positions: number[] = [],
+      colors: number[] = [],
+      sizes: number[] = []
+    const nodes: THREE.Vector3[] = []
+    const color = new THREE.Color()
+    for (let index = 0; index < 160; index++) {
+      const vertical = random() * 2 - 1
+      const azimuth = random() * Math.PI * 2
+      const radius = 4.3 + random() * 2.2 + Math.sin(azimuth * 3) * 0.25
+      const spread = Math.sqrt(1 - vertical * vertical)
+      nodes.push(
+        new THREE.Vector3(
+          Math.cos(azimuth) * spread * radius,
+          vertical * radius * 0.85,
+          Math.sin(azimuth) * spread * radius,
+        ),
+      )
+    }
+    for (const [nodeIndex, node] of nodes.entries()) {
+      const nearby = nodes
+        .map((neighbor, index) => ({
+          neighbor,
+          index,
+          distance: node.distanceTo(neighbor),
+        }))
+        .filter(({ index, distance }) => index > nodeIndex && distance < 2.2)
+        .sort((first, second) => first.distance - second.distance)
+        .slice(0, 3)
+      for (const { neighbor } of nearby) {
+        for (let index = 0; index < 80; index++) {
+          const point = node.clone().lerp(neighbor, random())
+          point.add(
+            new THREE.Vector3(
+              random() - 0.5,
+              random() - 0.5,
+              random() - 0.5,
+            ).multiplyScalar(0.22),
+          )
+          if (point.length() < 4) continue
+          positions.push(...point.toArray())
+          color
+            .set(index % 5 === 0 ? '#edd5ad' : '#9fbbd1')
+            .multiplyScalar(0.32 + random() * 0.5)
+          colors.push(color.r, color.g, color.b)
+          sizes.push(0.035 + random() * 0.075)
+        }
+      }
+      for (let index = 0; index < 18; index++) {
+        const spread = random() * 0.14
+        positions.push(
+          node.x + (random() - 0.5) * spread,
+          node.y + (random() - 0.5) * spread,
+          node.z + (random() - 0.5) * spread,
+        )
+        colors.push(0.7, 0.64, 0.5)
+        sizes.push(0.03 + random() * 0.09)
+      }
+    }
+    for (let index = 0; index < 18; index++) {
+      const point = new THREE.Vector3(
+        random() - 0.5,
+        random() - 0.5,
+        random() - 0.5,
+      )
+        .normalize()
+        .multiplyScalar(Math.cbrt(random()) * 3.7)
+      positions.push(...point.toArray())
+      colors.push(0.55, 0.65, 0.73)
+      sizes.push(0.07)
+    }
+    const web = this.volumeParticles(positions, colors, sizes, 0.82)
+    web.name = 'void-surrounding-galaxy-filaments'
+    this.content.add(web)
+    this.renderer.domElement.dataset.voidRepresentation =
+      'sparse-galaxies-no-surface'
+    this.renderer.domElement.dataset.voidInteriorMarkers = '18'
   }
 
   private buildUniverse(object: CelestialObject) {
@@ -2374,6 +3412,9 @@ export class SpaceScene {
     this.buildingWorldVisual = true
     try {
       switch (object.scene) {
+        case 'spacecraft':
+          parent.add(this.spacecraft(object))
+          break
         case 'planet':
           parent.add(this.planet(object, 1, true))
           break
@@ -2415,6 +3456,9 @@ export class SpaceScene {
         case 'cluster':
           this.buildCluster(object)
           break
+        case 'void':
+          this.buildVoid(object)
+          break
         case 'universe':
           this.buildUniverse(object)
           break
@@ -2428,6 +3472,7 @@ export class SpaceScene {
   }
 
   private releaseWorldVisual(root: THREE.Group) {
+    disposeModelAssets(root)
     const descendants = new Set<THREE.Object3D>()
     const materials = new Set<THREE.Material>()
     root.traverse((node) => {
@@ -2497,6 +3542,10 @@ export class SpaceScene {
   }
 
   setObject(object: CelestialObject, view: ViewMode, immediate = false) {
+    this.renderer.setClearColor('#060809')
+    this.controls.enablePan = view !== 'sky'
+    this.camera.fov = view === 'sky' ? (this.options.skyFocus ? 2 : 65) : 43
+    this.camera.updateProjectionMatrix()
     if (this.activateContinuousMap(object, view, immediate)) return
     const nextContext = view === 'map' ? this.mapContextFor(object) : null
     const reuseMap =
@@ -2528,10 +3577,15 @@ export class SpaceScene {
     this.shaders = []
     this.billboards = []
     this.orbitPerspective = false
+    this.skyLayer = null
     const displayObject = nextContext
       ? (objectById.get(nextContext) ?? object)
       : object
-    if (nextContext === 'nearby-stars') {
+    if (view === 'sky') {
+      this.buildSky()
+    } else if (view === 'compare') {
+      this.buildComparison()
+    } else if (nextContext === 'nearby-stars') {
       this.buildStellarMap()
     } else if (
       view === 'orbit' &&
@@ -2540,6 +3594,10 @@ export class SpaceScene {
       this.buildSystem(object, true)
     } else {
       switch (displayObject.scene) {
+        case 'spacecraft':
+          this.fitRadius = 1.1
+          this.content.add(this.spacecraft(displayObject))
+          break
         case 'comet':
           this.fitRadius = 3.1
           this.content.add(this.comet(displayObject))
@@ -2573,6 +3631,10 @@ export class SpaceScene {
         case 'cluster':
           this.buildCluster(displayObject)
           break
+        case 'void':
+          this.buildVoid(displayObject)
+          this.starfield.visible = false
+          break
         case 'universe':
           this.buildUniverse(displayObject)
           break
@@ -2582,7 +3644,15 @@ export class SpaceScene {
       object.scene === 'planet' && view === 'object'
         ? 1.8
         : this.fitRadius * 0.17
-    this.controls.maxDistance = Math.max(25, this.fitRadius * 10)
+    this.controls.maxDistance = Math.max(
+      25,
+      this.fitRadius * 10,
+      this.cameraDistance() * 1.1,
+    )
+    if (view === 'sky') {
+      this.controls.minDistance = 0.08
+      this.controls.maxDistance = 0.12
+    }
     if (view === 'map') {
       this.controls.minDistance = 0.035
       this.controls.maxDistance = 220
@@ -2622,6 +3692,16 @@ export class SpaceScene {
   }
 
   setOptions(options: SceneOptions) {
+    const skyChanged =
+      JSON.stringify(this.options.observer) !==
+        JSON.stringify(options.observer) ||
+      this.options.skyFocus !== options.skyFocus ||
+      this.options.catalogRevision !== options.catalogRevision
+    const comparisonChanged =
+      JSON.stringify(this.options.comparison) !==
+      JSON.stringify(options.comparison)
+    const rulerChanged = Boolean(this.options.ruler) !== Boolean(options.ruler)
+    const galaxyStyleChanged = this.options.galaxyStyle !== options.galaxyStyle
     const rebuild =
       (this.options.compressed !== options.compressed ||
         this.options.catalogRevision !== options.catalogRevision) &&
@@ -2629,8 +3709,18 @@ export class SpaceScene {
         this.mapContext === 'solar-system' ||
         this.mapContext === 'nearby-stars')
     const refit = this.options.inspectorOpen !== options.inspectorOpen
+    const uiChanged =
+      Boolean(this.options.uiHidden) !== Boolean(options.uiHidden)
     const qualityChange = this.options.highQuality !== options.highQuality
     this.options = options
+    if (galaxyStyleChanged)
+      this.scene.traverse((node) => {
+        if (node.userData.referenceOnly)
+          node.visible = options.galaxyStyle === 'reference'
+      })
+    this.renderer.domElement.dataset.uiHidden = String(
+      Boolean(options.uiHidden),
+    )
     this.renderer.domElement.dataset.catalogReady = String(
       Boolean(options.catalogRevision),
     )
@@ -2641,9 +3731,18 @@ export class SpaceScene {
     this.controls.touches.ONE =
       options.navigation === 'pan' ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE
     this.renderer.domElement.dataset.navigation = options.navigation ?? 'orbit'
+    if (this.view === 'sky' && skyChanged) {
+      this.setObject(this.selected, this.view, true)
+      return
+    }
+    if (this.view === 'compare' && comparisonChanged) {
+      this.setObject(this.selected, this.view, true)
+      return
+    }
     if (this.continuousMap && this.view === 'map') {
       this.continuousMap.setOptions(options)
-      if (qualityChange || refit) this.resize()
+      if (qualityChange || refit || uiChanged || rulerChanged)
+        this.resize(uiChanged || rulerChanged)
       return
     }
     if (qualityChange) {
@@ -2658,20 +3757,25 @@ export class SpaceScene {
       this.setObject(this.selected, this.view)
     }
     if (refit) this.resize()
+    else if (uiChanged) this.resize(true)
   }
 
   private cameraDistance(radius = this.fitRadius) {
     const { width, height } = this.host.getBoundingClientRect()
     const mobile = width < 760
-    const availableWidth = mobile
-      ? width - 76
-      : width -
-        (width < 1100 ? 220 : 252) -
-        (this.options.inspectorOpen ? 330 : 54) -
-        70
-    const availableHeight = mobile
-      ? Math.max(110, height - 278 - (this.view === 'map' ? 275 : 255))
-      : height * 0.7
+    const availableWidth = this.options.uiHidden
+      ? width * 0.94
+      : mobile
+        ? width - 76
+        : width -
+          (width < 1100 ? 220 : 252) -
+          (this.options.inspectorOpen ? 330 : 54) -
+          70
+    const availableHeight = this.options.uiHidden
+      ? height * 0.94
+      : mobile
+        ? Math.max(110, height - 278 - (this.view === 'map' ? 275 : 255))
+        : height * 0.7
     const tangent = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))
     return (
       radius /
@@ -2680,6 +3784,22 @@ export class SpaceScene {
   }
 
   reset(immediate = false) {
+    if (this.view === 'sky') {
+      const direction = this.options.skyFocus
+        ? observerBody(
+            this.options.skyFocus === 'Sun' ? Body.Sun : Body.Moon,
+            new Date(this.timestamp),
+            this.options.observer ?? defaultObserver,
+          ).direction
+        : horizontalDirection(180, 25)
+      this.camera.position.fromArray(direction).multiplyScalar(-0.1)
+      this.controls.target.set(0, 0, 0)
+      this.camera.lookAt(this.controls.target)
+      this.controls.update()
+      this.flying = this.dollying = false
+      this.renderer.domElement.dataset.flying = 'false'
+      return
+    }
     if (this.continuousMap && this.view === 'map') {
       this.continuousMap.reset()
       return
@@ -2688,6 +3808,7 @@ export class SpaceScene {
     this.dollying = false
     this.targetLookAt.set(0, 0, 0)
     const distance = this.cameraDistance()
+    this.renderer.domElement.dataset.cameraFitDistance = String(distance)
     this.targetCamera.set(
       0,
       distance *
@@ -2712,6 +3833,12 @@ export class SpaceScene {
   }
 
   zoom(factor: number) {
+    this.renderer.domElement.dataset.lastZoomFactor = String(factor)
+    if (this.view === 'sky') {
+      this.camera.fov = THREE.MathUtils.clamp(this.camera.fov * factor, 0.2, 90)
+      this.camera.updateProjectionMatrix()
+      return
+    }
     if (this.continuousMap && this.view === 'map') {
       this.continuousMap.zoom(factor)
       return
@@ -2740,15 +3867,92 @@ export class SpaceScene {
     this.continuousMap?.setFollow(id)
   }
 
-  screenshot() {
-    this.renderer.render(this.scene, this.camera)
-    const link = document.createElement('a')
-    link.href = this.renderer.domElement.toDataURL('image/png')
-    link.download = `hello-world-${this.selected.id}-${new Date(this.timestamp).toISOString().slice(0, 10)}.png`
-    link.click()
+  toggleFollow(id: string) {
+    this.continuousMap?.toggleFollow(id)
   }
 
-  private updateRenderResolution() {
+  frameRuler() {
+    this.continuousMap?.frameRuler()
+  }
+
+  capturePose(): CameraPose {
+    return (
+      this.continuousMap?.capturePose() ?? {
+        position: this.camera.position.toArray(),
+        target: this.controls.target.toArray(),
+        up: this.camera.up.toArray(),
+        fov: this.camera.fov,
+      }
+    )
+  }
+
+  restoreViewpoint(point: Viewpoint) {
+    const object = objectById.get(point.objectId)
+    if (!object) return
+    this.timestamp = point.timestamp
+    this.setObject(object, point.view, true)
+    this.flying = this.dollying = false
+    this.followNode = null
+    this.clearMovement()
+    const damping = this.controls.enableDamping
+    this.controls.enableDamping = false
+    this.controls.update()
+    this.controls.enableDamping = damping
+    if (this.continuousMap) this.continuousMap.restorePose(point.camera)
+    else {
+      this.camera.fov = point.camera.fov ?? 43
+      this.camera.updateProjectionMatrix()
+      this.camera.up.fromArray(point.camera.up).normalize()
+      this.camera.position.fromArray(point.camera.position)
+      this.controls.target.fromArray(point.camera.target)
+      this.camera.lookAt(this.controls.target)
+      this.controls.update()
+    }
+    this.renderer.domElement.dataset.flying = 'false'
+    this.renderer.domElement.dataset.cameraFov = String(this.camera.fov)
+    this.renderer.domElement.dataset.viewpointApplied = point.name
+  }
+
+  screenshot() {
+    const navigationQuality = this.navigationQuality
+    this.navigationQuality = false
+    this.updateRenderResolution(true)
+    try {
+      this.renderer.render(this.scene, this.camera)
+      const link = document.createElement('a')
+      link.href = this.renderer.domElement.toDataURL('image/png')
+      link.download = `hello-world-${this.selected.id}-${new Date(this.timestamp).toISOString().slice(0, 10)}.png`
+      link.click()
+    } finally {
+      this.navigationQuality = navigationQuality
+      this.updateRenderResolution()
+    }
+  }
+
+  private updateNavigationQuality(now: number) {
+    this.viewOffset.copy(this.camera.position).sub(this.controls.target)
+    const moved =
+      this.controlActive ||
+      (this.view !== 'map' && this.flying) ||
+      (this.view === 'map' &&
+        (this.pressedKeys.size > 0 ||
+          this.renderer.domElement.dataset.flying === 'true')) ||
+      this.viewOffset.distanceToSquared(this.previousViewOffset) >
+        Math.max(1e-24, this.viewOffset.lengthSq() * 1e-8) ||
+      1 - Math.abs(this.camera.quaternion.dot(this.previousViewRotation)) > 1e-8
+    if (moved) this.lastCameraMotion = now
+    this.previousViewOffset.copy(this.viewOffset)
+    this.previousViewRotation.copy(this.camera.quaternion)
+    const reduced =
+      this.options.adaptiveQuality !== false &&
+      (moved || now - this.lastCameraMotion < 300)
+    if (reduced !== this.navigationQuality) {
+      this.navigationQuality = reduced
+      this.updateRenderResolution()
+    }
+  }
+
+  private updateRenderResolution(fullQuality = false) {
     const width = Math.max(1, this.host.clientWidth)
     const height = Math.max(1, this.host.clientHeight)
     const blackHole = this.continuousMap
@@ -2761,12 +3965,22 @@ export class SpaceScene {
       : this.options.highQuality
         ? 5000000
         : 2000000
-    const ratio = Math.min(
-      window.devicePixelRatio,
-      this.options.highQuality ? 2 : 1.25,
-      Math.sqrt(budget / (width * height)),
-    )
-    this.renderer.setPixelRatio(ratio)
+    const reduced =
+      this.navigationQuality &&
+      !fullQuality &&
+      this.options.adaptiveQuality !== false
+    const ratio =
+      Math.min(
+        window.devicePixelRatio,
+        this.options.highQuality ? 2 : 1.25,
+        Math.sqrt(budget / (width * height)),
+      ) * (reduced ? 0.7 : 1)
+    if (Math.abs(this.renderer.getPixelRatio() - ratio) > 0.001)
+      this.renderer.setPixelRatio(ratio)
+    this.renderer.domElement.dataset.renderQuality = reduced
+      ? 'navigation'
+      : 'full'
+    this.renderer.domElement.dataset.renderPixelRatio = ratio.toFixed(3)
     this.scene.traverse((node) => {
       const material = (node as THREE.Points).material as
         THREE.ShaderMaterial | undefined
@@ -2775,7 +3989,7 @@ export class SpaceScene {
     })
   }
 
-  private resize() {
+  private resize(preserveCamera = false) {
     const { width, height } = this.host.getBoundingClientRect()
     if (!width || !height) return
     this.updateRenderResolution()
@@ -2784,16 +3998,23 @@ export class SpaceScene {
     const mobile = width < 760
     const left = width < 1100 ? 220 : 252
     const right = this.options.inspectorOpen ? 330 : 54
-    this.camera.setViewOffset(
-      width,
-      height,
-      mobile ? 19 : (right - left) / 2,
-      mobile ? (278 - (this.view === 'map' ? 275 : 255)) / 2 : -height * 0.015,
-      width,
-      height,
-    )
+    if (this.options.uiHidden) this.camera.clearViewOffset()
+    else
+      this.camera.setViewOffset(
+        width,
+        height,
+        mobile ? 19 : (right - left) / 2,
+        mobile
+          ? this.options.ruler
+            ? height * 0.18
+            : (278 - (this.view === 'map' ? 275 : 255)) / 2
+          : -height * 0.015,
+        width,
+        height,
+      )
     this.camera.updateProjectionMatrix()
-    if (this.continuousMap && this.view === 'map') return
+    this.renderer.domElement.dataset.cameraFov = String(this.camera.fov)
+    if (preserveCamera || (this.continuousMap && this.view === 'map')) return
     if (this.view === 'map' && this.mapNodes.has(this.selected.id))
       this.focusMapObject(this.selected)
     else this.reset()
@@ -2854,6 +4075,14 @@ export class SpaceScene {
     const elapsed = Math.max(0, (now - (this.lastFrame || now)) / 1000)
     const delta = Math.min(elapsed, 0.05)
     this.lastFrame = now
+    if (
+      this.view === 'sky' &&
+      Math.abs(this.timestamp - this.lastSkyTime) > 30000 &&
+      now - this.lastSkyFrame > 250
+    ) {
+      this.updateSky()
+      this.lastSkyFrame = now
+    }
     if (this.options.playing) this.visualTime += Math.min(elapsed, 0.2)
     this.renderer.domElement.dataset.visualTime = this.visualTime.toFixed(4)
     if (this.continuousMap && this.view === 'map') {
@@ -2882,6 +4111,7 @@ export class SpaceScene {
       this.billboards.forEach((node) =>
         node.quaternion.copy(this.camera.quaternion),
       )
+      this.updateNavigationQuality(now)
       this.renderer.render(this.scene, this.camera)
       this.renderer.domElement.dataset.frame = String(Math.round(now))
       this.renderer.domElement.dataset.simulationTime = String(
@@ -2927,8 +4157,11 @@ export class SpaceScene {
     if (Math.abs(this.timestamp - this.lastEphemeris) > 1_000) {
       const date = new Date(this.timestamp)
       this.entries.forEach(({ node, object, scale, compressed, parent }) => {
+        const position = getPosition(object, date)
+        node.visible = position.every(Number.isFinite)
+        if (!node.visible) return
         node.position
-          .fromArray(displayPosition(getPosition(object, date), compressed))
+          .fromArray(displayPosition(position, compressed))
           .multiplyScalar(scale)
         if (parent) node.position.add(parent.position)
       })
@@ -2992,6 +4225,7 @@ export class SpaceScene {
     this.camera.position.add(translation)
     this.controls.target.add(translation)
     this.controls.update()
+    this.updateNavigationQuality(now)
     this.renderer.render(this.scene, this.camera)
     const width = this.host.clientWidth
     const height = this.host.clientHeight
@@ -3071,6 +4305,7 @@ export class SpaceScene {
     cancelAnimationFrame(this.frame)
     this.observer.disconnect()
     this.controls.removeEventListener('start', this.handleControlStart)
+    this.controls.removeEventListener('end', this.handleControlEnd)
     this.controls.dispose()
     this.renderer.domElement.removeEventListener(
       'pointerdown',
@@ -3106,6 +4341,7 @@ export class SpaceScene {
     disposeGroup(this.content)
     disposeGroup(this.starfield)
     this.textures.forEach((texture) => texture.dispose())
+    this.modelData.clear()
     this.renderer.dispose()
     this.renderer.domElement.remove()
   }

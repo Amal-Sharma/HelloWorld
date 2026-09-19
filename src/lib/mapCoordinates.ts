@@ -15,6 +15,50 @@ export const AU_PER_PARSEC = 206264.80624709636
 export const KM_PER_PARSEC = 3.085677581491367e13
 export const LIGHT_YEARS_PER_PARSEC = 3.261563777
 export const OBSERVABLE_RADIUS_PC = 14.26e9
+export const LIGHT_SPEED_KM_S = 299792.458
+
+export interface DistanceMeasurement {
+  fromId: string
+  toId: string
+  distancePc: number | null
+  lightSeconds: number | null
+  basis: 'calculated' | 'catalog' | 'cosmological'
+  unavailable: string | null
+}
+
+export function measurePositions(first: Position, second: Position) {
+  if (!first.every(Number.isFinite) || !second.every(Number.isFinite))
+    return null
+  const distancePc = Math.hypot(
+    ...first.map((coordinate, index) => coordinate - second[index]),
+  )
+  return {
+    distancePc,
+    lightSeconds: (distancePc * KM_PER_PARSEC) / LIGHT_SPEED_KM_S,
+  }
+}
+
+export function formatLightTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'Unavailable'
+  const [duration, unit] =
+    seconds < 60
+      ? [seconds, 's']
+      : seconds < 3600
+        ? [seconds / 60, 'min']
+        : seconds < 86400
+          ? [seconds / 3600, 'h']
+          : seconds < 31557600
+            ? [seconds / 86400, 'days']
+            : [seconds / 31557600, seconds === 31557600 ? 'year' : 'years']
+  return `${duration.toLocaleString('en-US', { maximumSignificantDigits: 4 })} ${unit}`
+}
+
+export function formatRulerDistance(parsecs: number): string {
+  if (parsecs * AU_PER_PARSEC >= 0.01 && parsecs < 0.02)
+    return `${(parsecs * AU_PER_PARSEC).toLocaleString('en-US', { maximumSignificantDigits: 5 })} AU`
+  return formatWorldDistance(parsecs)
+}
+
 const epoch = MakeTime(new Date('2000-01-01T12:00:00Z'))
 const galacticRotation = Rotation_EQJ_GAL()
 const eclipticRotation = Rotation_ECL_EQJ()
@@ -38,10 +82,18 @@ export function catalogToWorld(positionPc: Position): Position {
 
 export function solarPositionPc(object: CelestialObject, date: Date): Position {
   const position = eclipticToWorld(getPosition(object, date))
-  if (object.id !== 'moon' && !object.jovianMoon) return position
+  if (object.id !== 'moon' && !object.jovianMoon && !object.saturnianMoon)
+    return position
   const primary = RotateVector(
     galacticRotation,
-    HelioVector(object.jovianMoon ? Body.Jupiter : Body.Earth, date),
+    HelioVector(
+      object.saturnianMoon
+        ? Body.Saturn
+        : object.jovianMoon
+          ? Body.Jupiter
+          : Body.Earth,
+      date,
+    ),
   )
   return [
     position[0] + primary.x / AU_PER_PARSEC,
@@ -99,6 +151,8 @@ export function absolutePosition(
 
 export function formatWorldDistance(parsecs: number): string {
   const absolute = Math.abs(parsecs)
+  if (absolute * KM_PER_PARSEC < 1)
+    return `${(parsecs * KM_PER_PARSEC * 1000).toLocaleString('en-US', { maximumFractionDigits: 1 })} m`
   if (absolute < 0.00001)
     return `${(parsecs * KM_PER_PARSEC).toLocaleString('en-US', { maximumFractionDigits: 0 })} km`
   if (absolute < 0.02)

@@ -15,7 +15,12 @@ import {
   starId,
   stellarColor,
 } from '../data/extendedCatalog'
-import { DAY_MS, sampleOrbit, smallBodyPosition } from '../lib/astronomy'
+import {
+  DAY_MS,
+  sampleOrbit,
+  sampleSmallBodyOrbit,
+  smallBodyPosition,
+} from '../lib/astronomy'
 import {
   AU_PER_PARSEC,
   catalogToWorld,
@@ -26,7 +31,10 @@ import {
   renderUnitPc,
   skyPositionPc,
   solarPositionPc,
+  measurePositions,
 } from '../lib/mapCoordinates'
+import type { DistanceMeasurement } from '../lib/mapCoordinates'
+import type { CameraPose } from '../lib/viewpoints'
 
 export interface MapTelemetry {
   region: string
@@ -37,6 +45,7 @@ export interface MapTelemetry {
   mapped: number
   focusedId?: string
   followingId?: string
+  measurement?: DistanceMeasurement | null
 }
 
 interface Entry {
@@ -58,6 +67,7 @@ interface MapOptions {
   labels: boolean
   orbits: boolean
   highQuality: boolean
+  ruler?: readonly [string, string] | null
   catalogRevision?: number
 }
 interface Model {
@@ -120,13 +130,55 @@ export class ContinuousMap {
   private zoomPointer: THREE.Vector2 | null = null
   private velocity = new THREE.Vector3()
   private cloud: THREE.Points
+  private rulerLine = new THREE.Line(
+    new THREE.BufferGeometry().setAttribute(
+      'position',
+      new THREE.BufferAttribute(new Float32Array(6), 3),
+    ),
+    new THREE.LineBasicMaterial({
+      color: '#d7e6ae',
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  )
+  private rulerEnds = new THREE.Points(
+    new THREE.BufferGeometry().setAttribute(
+      'position',
+      new THREE.BufferAttribute(new Float32Array(6), 3),
+    ),
+    new THREE.PointsMaterial({
+      color: '#d7e6ae',
+      size: 7,
+      sizeAttenuation: false,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  )
   private labels: HTMLButtonElement[] = []
   private labelEntries: Entry[] = []
   private paths: {
+    id: string
     line: THREE.Line
     positions: THREE.Vector3[]
     parentId?: string
   }[] = []
+  private minorOrbitRoot = new THREE.Group()
+  private minorOrbitRevision = -1
+  private minorOrbitBatches: {
+    kind: ObjectKind
+    line: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>
+    entries: { id: string; elements: OrbitalElements }[]
+    next: number
+    count: number
+    vertices: number
+  }[] = []
+  private selectedMinorOrbit: {
+    id: string
+    line: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>
+    positions: THREE.Vector3[]
+  } | null = null
   private options: MapOptions
   private revision = -1
   private timestamp: number
@@ -191,6 +243,11 @@ export class ContinuousMap {
     this.cloud.frustumCulled = false
     this.cloud.renderOrder = 5
     this.root.add(this.cloud)
+    this.rulerLine.name = 'distance-ruler'
+    this.rulerLine.frustumCulled = this.rulerEnds.frustumCulled = false
+    this.rulerLine.visible = this.rulerEnds.visible = false
+    this.rulerLine.renderOrder = this.rulerEnds.renderOrder = 10
+    this.root.add(this.rulerLine, this.rulerEnds)
     this.controls.minDistance = 1e-9
     this.controls.maxDistance = 1e20
     this.refreshCatalog()
@@ -199,6 +256,9 @@ export class ContinuousMap {
       new THREE.Vector3(),
     )
     this.createPaths()
+    this.minorOrbitRoot.name = 'catalog-solar-orbits'
+    this.minorOrbitRoot.visible = false
+    this.root.add(this.minorOrbitRoot)
     for (let labelIndex = 0; labelIndex < 22; labelIndex++) {
       const label = document.createElement('button')
       label.className = 'celestial-label'
@@ -240,13 +300,28 @@ export class ContinuousMap {
         color: object.color,
         position: new THREE.Vector3(),
       }
-      if (object.body || object.id === 'moon' || object.jovianMoon)
+      if (
+        object.body ||
+        object.id === 'moon' ||
+        object.jovianMoon ||
+        object.saturnianMoon ||
+        object.trajectory
+      ) {
+        const position = solarPositionPc(object, date)
+        const positionValid = position.every(Number.isFinite)
         this.add({
           ...base,
-          position: new THREE.Vector3(...solarPositionPc(object, date)),
+          position: new THREE.Vector3(
+            ...(positionValid
+              ? position
+              : object.trajectory
+                ? solarPositionPc(object, new Date(object.trajectory[0][0]))
+                : [0, 0, 0]),
+          ),
+          positionValid,
           solar: object,
         })
-      else if (object.id === 'sun') this.add(base)
+      } else if (object.id === 'sun') this.add(base)
       else if (object.id === 'solar-system')
         this.add({ ...base, radius: 38 / AU_PER_PARSEC, aggregate: true })
       else if (object.id === 'nearby-stars')
@@ -390,7 +465,7 @@ export class ContinuousMap {
       sizes[index] =
         entry.id === 'solar-system'
           ? 5
-          : entry.aggregate
+          : entry.aggregate || entry.kind === 'void'
             ? 0
             : entry.kind === 'star'
               ? Math.max(1, 4.8 - (entry.magnitude ?? 1) * 0.36)
@@ -416,7 +491,7 @@ export class ContinuousMap {
   private createPaths() {
     for (const object of [
       ...solarPlanets,
-      ...catalog.filter((item) => item.kind === 'moon'),
+      ...catalog.filter((item) => item.kind === 'moon' || item.trajectory),
     ]) {
       const positions = sampleOrbit(object, new Date(this.timestamp), 220).map(
         (point) => new THREE.Vector3(...eclipticToWorld(point)),
@@ -441,11 +516,203 @@ export class ContinuousMap {
       line.frustumCulled = false
       this.root.add(line)
       this.paths.push({
+        id: object.id,
         line,
         positions,
         parentId: object.kind === 'moon' ? object.parent : undefined,
       })
     }
+  }
+
+  private updateMinorOrbits() {
+    const atOrbitScale =
+      this.options.orbits && this.unit < 0.02 && this.unit > 1e-9
+    const visible =
+      atOrbitScale &&
+      this.worldCamera.length() <
+        this.currentDistance * 4 + 10000 / AU_PER_PARSEC
+    this.minorOrbitRoot.visible = visible
+    if (visible && this.minorOrbitRevision !== this.revision) {
+      for (const batch of this.minorOrbitBatches) removeVisual(batch.line)
+      this.minorOrbitBatches = []
+      this.minorOrbitRevision = this.revision
+      const groups = new Map<
+        ObjectKind,
+        { id: string; elements: OrbitalElements }[]
+      >([
+        ['dwarf-planet', []],
+        ['asteroid', []],
+        ['comet', []],
+      ])
+      for (const row of extendedData.minorBodies) {
+        const elements = elementsFromRow(row)
+        if (elements)
+          groups
+            .get(minorBodyKind(row))!
+            .push({ id: minorBodyId(row), elements })
+      }
+      for (const [kind, entries] of groups) {
+        if (!entries.length) continue
+        const geometry = new THREE.BufferGeometry()
+        geometry.setAttribute(
+          'position',
+          new THREE.BufferAttribute(
+            new Float32Array(entries.length * 64 * 6),
+            3,
+          ),
+        )
+        geometry.setDrawRange(0, 0)
+        const line = new THREE.LineSegments(
+          geometry,
+          new THREE.LineBasicMaterial({
+            color:
+              kind === 'dwarf-planet'
+                ? '#c4b391'
+                : kind === 'comet'
+                  ? '#74aeb1'
+                  : '#929b87',
+            transparent: true,
+            opacity:
+              kind === 'dwarf-planet' ? 0.42 : kind === 'comet' ? 0.006 : 0.01,
+            depthWrite: false,
+          }),
+        )
+        line.name = `${kind}-orbit-batch`
+        line.frustumCulled = false
+        this.minorOrbitRoot.add(line)
+        this.minorOrbitBatches.push({
+          kind,
+          line,
+          entries,
+          next: 0,
+          count: 0,
+          vertices: 0,
+        })
+      }
+    }
+    if (visible) {
+      let processed = 0
+      const started = performance.now()
+      for (const batch of this.minorOrbitBatches) {
+        const attribute = batch.line.geometry.getAttribute(
+          'position',
+        ) as THREE.BufferAttribute
+        const start = batch.vertices
+        while (
+          batch.next < batch.entries.length &&
+          processed < 512 &&
+          (processed === 0 || performance.now() - started < 8)
+        ) {
+          const entry = batch.entries[batch.next++]
+          processed++
+          const points = sampleSmallBodyOrbit(entry.elements, 64).map((point) =>
+            eclipticToWorld(point),
+          )
+          if (points.length < 2) continue
+          for (let index = 1; index < points.length; index++) {
+            attribute.setXYZ(batch.vertices++, ...points[index - 1])
+            attribute.setXYZ(batch.vertices++, ...points[index])
+          }
+          batch.count++
+        }
+        if (batch.vertices !== start) {
+          attribute.addUpdateRange(start * 3, (batch.vertices - start) * 3)
+          attribute.needsUpdate = true
+          batch.line.geometry.setDrawRange(0, batch.vertices)
+        }
+      }
+      this.minorOrbitRoot.position
+        .copy(this.origin)
+        .multiplyScalar(-1 / this.unit)
+      this.minorOrbitRoot.scale.setScalar(1 / this.unit)
+    }
+    const selected = this.index.get(this.selected)
+    if (
+      this.selectedMinorOrbit?.id !==
+      (selected?.elements ? selected.id : undefined)
+    ) {
+      if (this.selectedMinorOrbit) removeVisual(this.selectedMinorOrbit.line)
+      this.selectedMinorOrbit = null
+      if (selected?.elements) {
+        const positions = sampleSmallBodyOrbit(selected.elements, 720).map(
+          (point) => new THREE.Vector3(...eclipticToWorld(point)),
+        )
+        if (positions.length > 1) {
+          const geometry = new THREE.BufferGeometry().setAttribute(
+            'position',
+            new THREE.BufferAttribute(
+              new Float32Array(positions.length * 3),
+              3,
+            ),
+          )
+          const line = new THREE.Line(
+            geometry,
+            new THREE.LineBasicMaterial({
+              color: '#d7e6ae',
+              transparent: true,
+              opacity: 0.85,
+              depthWrite: false,
+            }),
+          )
+          line.name = 'selected-minor-body-orbit'
+          line.frustumCulled = false
+          this.root.add(line)
+          this.selectedMinorOrbit = { id: selected.id, line, positions }
+        }
+      }
+    }
+    if (this.selectedMinorOrbit) {
+      const { line, positions } = this.selectedMinorOrbit
+      line.visible = atOrbitScale
+      if (line.visible) {
+        const attribute = line.geometry.getAttribute(
+          'position',
+        ) as THREE.BufferAttribute
+        positions.forEach((point, index) => {
+          this.projected.copy(point).sub(this.origin).divideScalar(this.unit)
+          attribute.setXYZ(
+            index,
+            this.projected.x,
+            this.projected.y,
+            this.projected.z,
+          )
+        })
+        attribute.needsUpdate = true
+      }
+    }
+    const canvas = this.host.querySelector('canvas')!
+    const counts: Partial<Record<ObjectKind, number>> = {}
+    for (const path of this.paths) {
+      const kind = objectById.get(path.id)!.kind
+      counts[kind] = (counts[kind] ?? 0) + 1
+    }
+    for (const batch of this.minorOrbitBatches) counts[batch.kind] = batch.count
+    canvas.dataset.solarOrbitCounts = JSON.stringify(counts)
+    canvas.dataset.skippedOrbitCount = String(
+      this.minorOrbitRevision === this.revision
+        ? extendedData.minorBodies.length -
+            this.minorOrbitBatches.reduce(
+              (sum, batch) =>
+                sum + batch.entries.length - batch.next + batch.count,
+              0,
+            )
+        : 0,
+    )
+    canvas.dataset.minorOrbitState =
+      this.minorOrbitRevision < this.revision ||
+      this.minorOrbitBatches.some((batch) => batch.next < batch.entries.length)
+        ? 'pending'
+        : 'ready'
+    canvas.dataset.orbitDrawCalls = String(
+      this.paths.filter((path) => path.line.visible).length +
+        (visible
+          ? this.minorOrbitBatches.filter((batch) => batch.count > 0).length
+          : 0) +
+        (this.selectedMinorOrbit?.line.visible ? 1 : 0),
+    )
+    canvas.dataset.selectedOrbitId = this.selectedMinorOrbit?.line.visible
+      ? this.selectedMinorOrbit.id
+      : ''
   }
 
   private readCamera() {
@@ -461,7 +728,7 @@ export class ContinuousMap {
 
   private minimumCameraDistance(target: THREE.Vector3) {
     return Math.max(
-      5e-13,
+      5e-16,
       Math.max(Math.abs(target.x), Math.abs(target.y), Math.abs(target.z)) *
         Number.EPSILON *
         32,
@@ -499,6 +766,156 @@ export class ContinuousMap {
   }
   setTime(timestamp: number) {
     this.timestamp = timestamp
+  }
+
+  capturePose(): CameraPose {
+    this.readCamera()
+    return {
+      position: this.worldCamera.toArray(),
+      target: this.worldTarget.toArray(),
+      up: this.camera.up.toArray(),
+    }
+  }
+
+  restorePose(pose: CameraPose) {
+    this.interrupt()
+    this.velocity.set(0, 0, 0)
+    const damping = this.controls.enableDamping
+    this.controls.enableDamping = false
+    this.controls.update()
+    this.controls.enableDamping = damping
+    this.camera.up.fromArray(pose.up).normalize()
+    this.setWorldCamera(
+      new THREE.Vector3(...pose.position),
+      new THREE.Vector3(...pose.target),
+    )
+    this.controls.update()
+    this.readCamera()
+    const canvas = this.host.querySelector('canvas')!
+    canvas.dataset.worldCamera = this.worldCamera.toArray().join(',')
+    canvas.dataset.worldTarget = this.worldTarget.toArray().join(',')
+    canvas.dataset.followingId = ''
+  }
+
+  private measurementPosition(id: string) {
+    const entry = this.index.get(id)
+    if (!entry || entry.aggregate) return null
+    const date = new Date(this.timestamp)
+    const position = entry.solar
+      ? solarPositionPc(entry.solar, date)
+      : entry.elements
+        ? eclipticToWorld(smallBodyPosition(entry.elements, date))
+        : entry.position.toArray()
+    return position.every(Number.isFinite) ? position : null
+  }
+
+  measure(fromId: string, toId: string): DistanceMeasurement {
+    const first = this.measurementPosition(fromId)
+    const second = this.measurementPosition(toId)
+    const unavailableId = !first ? fromId : !second ? toId : null
+    const measured = first && second ? measurePositions(first, second) : null
+    const referenceDistance = Math.max(
+      first ? Math.hypot(...first) : 0,
+      second ? Math.hypot(...second) : 0,
+    )
+    const estimated = [fromId, toId].some((id) => {
+      const entry = this.index.get(id)
+      return entry?.approximate || (!entry?.solar && id !== 'sun')
+    })
+    return {
+      fromId,
+      toId,
+      distancePc: measured?.distancePc ?? null,
+      lightSeconds: measured?.lightSeconds ?? null,
+      basis:
+        referenceDistance >= 1e6
+          ? 'cosmological'
+          : estimated
+            ? 'catalog'
+            : 'calculated',
+      unavailable: unavailableId
+        ? `No usable position for ${objectById.get(unavailableId)?.name ?? unavailableId} at this date.`
+        : null,
+    }
+  }
+
+  frameRuler() {
+    const pair = this.options.ruler
+    if (!pair) return
+    const first = this.measurementPosition(pair[0])
+    const second = this.measurementPosition(pair[1])
+    if (!first || !second) return
+    this.interrupt()
+    this.readCamera()
+    this.velocity.set(0, 0, 0)
+    const start = new THREE.Vector3(...first)
+    const end = new THREE.Vector3(...second)
+    const target = start.clone().lerp(end, 0.5)
+    const radius = Math.max(
+      this.index.get(pair[0])!.radius,
+      this.index.get(pair[1])!.radius,
+    )
+    const distance = Math.max(
+      start.distanceTo(end) /
+        (Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) *
+          Math.min(this.camera.aspect, 1)),
+      radius * 6,
+      this.minimumCameraDistance(target),
+    )
+    const direction = this.worldCamera.clone().sub(this.worldTarget).normalize()
+    if (!direction.lengthSq()) direction.set(0, 0.5, 1).normalize()
+    this.flight = {
+      camera: target.clone().addScaledVector(direction, distance),
+      target,
+    }
+    this.host.querySelector('canvas')!.dataset.flying = 'true'
+  }
+
+  private updateRuler() {
+    const pair = this.options.ruler
+    const first = pair ? this.measurementPosition(pair[0]) : null
+    const second = pair ? this.measurementPosition(pair[1]) : null
+    this.rulerLine.visible = this.rulerEnds.visible = Boolean(first && second)
+    if (first && second) {
+      for (const geometry of [
+        this.rulerLine.geometry,
+        this.rulerEnds.geometry,
+      ]) {
+        const buffer = geometry.getAttribute(
+          'position',
+        ) as THREE.BufferAttribute
+        for (const [index, position] of [first, second].entries()) {
+          this.projected
+            .fromArray(position)
+            .sub(this.origin)
+            .divideScalar(this.unit)
+          buffer.setXYZ(
+            index,
+            this.projected.x,
+            this.projected.y,
+            this.projected.z,
+          )
+        }
+        buffer.needsUpdate = true
+      }
+      this.host.querySelector('canvas')!.dataset.rulerScreenPoints =
+        JSON.stringify(
+          [first, second].map((position) => {
+            this.projected
+              .fromArray(position)
+              .sub(this.origin)
+              .divideScalar(this.unit)
+              .project(this.camera)
+            return [
+              ((this.projected.x + 1) * this.host.clientWidth) / 2,
+              ((1 - this.projected.y) * this.host.clientHeight) / 2,
+            ]
+          }),
+        )
+    }
+    this.host.querySelector('canvas')!.dataset.rulerVisible = String(
+      this.rulerLine.visible,
+    )
   }
   stopMovement() {
     this.velocity.set(0, 0, 0)
@@ -541,6 +958,9 @@ export class ContinuousMap {
       target: entry.position.clone(),
     }
     this.host.querySelector('canvas')!.dataset.flying = 'true'
+  }
+  toggleFollow(id: string) {
+    this.setFollow(this.followLocked ? null : id)
   }
   select(id: string) {
     this.selected = id
@@ -644,6 +1064,8 @@ export class ContinuousMap {
       aimed &&
       [
         'planet',
+        'rogue-planet',
+        'spacecraft',
         'moon',
         'star',
         'asteroid',
@@ -726,6 +1148,7 @@ export class ContinuousMap {
     if (entry.kind === 'neutron-star') return entry.radius / 0.55
     if (entry.kind === 'cluster') return entry.radius / 6.4
     if (entry.kind === 'star-cluster') return entry.radius / 4
+    if (entry.kind === 'void') return entry.radius / 4
     if (entry.kind === 'universe') return entry.radius / 8.5
     return entry.radius
   }
@@ -771,6 +1194,17 @@ export class ContinuousMap {
       }
       if (entry.kind === 'black-hole' || entry.kind === 'quasar')
         this.nearBlackHole = true
+      if (entry.id === this.selected) {
+        const canvas = this.host.querySelector('canvas')!
+        model.root.traverse((node) => {
+          if (!node.userData.modelState) return
+          canvas.dataset.modelObject = entry.id
+          canvas.dataset.modelState = node.userData.modelState
+          canvas.dataset.modelParticles = String(
+            node.userData.modelParticles ?? 0,
+          )
+        })
+      }
     }
     if (this.models.size > 28) {
       const unused = [...this.models.values()]
@@ -790,9 +1224,21 @@ export class ContinuousMap {
     this.controls.update()
     this.readCamera()
     const date = new Date(this.timestamp)
-    for (const entry of this.entries)
-      if (entry.solar)
-        entry.position.fromArray(solarPositionPc(entry.solar, date))
+    for (const entry of this.entries) {
+      if (!entry.solar) continue
+      const position = solarPositionPc(entry.solar, date)
+      entry.positionValid = position.every(Number.isFinite)
+      if (entry.positionValid) entry.position.fromArray(position)
+      else if (this.following === entry) {
+        this.interrupt()
+        this.velocity.set(0, 0, 0)
+        this.host.dispatchEvent(
+          new CustomEvent('map-notice', {
+            detail: `Position unavailable for ${entry.name} at this date. The selected date is outside its supported ephemeris.`,
+          }),
+        )
+      }
+    }
     if (this.following?.elements) {
       const tracked = this.following
       const physical = smallBodyPosition(tracked.elements!, date)
@@ -886,6 +1332,11 @@ export class ContinuousMap {
       const tolerance = Math.max(
         1e-15,
         this.flight.camera.distanceTo(this.flight.target) * 0.0003,
+        Math.max(
+          Math.abs(this.flight.target.x),
+          Math.abs(this.flight.target.y),
+          Math.abs(this.flight.target.z),
+        ) * Number.EPSILON * 16,
       )
       if (
         this.worldCamera.distanceTo(this.flight.camera) < tolerance &&
@@ -1014,6 +1465,7 @@ export class ContinuousMap {
     positionAttribute.needsUpdate = true
     alphaAttribute.needsUpdate = true
     this.updateModels(now)
+    this.updateRuler()
     for (const path of this.paths) {
       path.line.visible =
         this.options.orbits &&
@@ -1038,6 +1490,7 @@ export class ContinuousMap {
       })
       buffer.needsUpdate = true
     }
+    this.updateMinorOrbits()
     if (labelFrame) this.updateLabels()
     const canvas = this.host.querySelector('canvas')!
     canvas.dataset.mapContext = 'unified'
@@ -1103,6 +1556,9 @@ export class ContinuousMap {
         mapped: this.entries.length,
         focusedId: focused?.id,
         followingId: this.followLocked ? this.following?.id : undefined,
+        measurement: this.options.ruler
+          ? this.measure(...this.options.ruler)
+          : null,
       }
       this.host.dispatchEvent(new CustomEvent('map-position', { detail }))
       this.lastTelemetry = now

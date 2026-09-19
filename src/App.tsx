@@ -1,4 +1,11 @@
-import { useEffect, useEffectEvent, useRef, useState } from 'react'
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from 'react'
 import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react'
 import {
   ArrowRight,
@@ -17,6 +24,7 @@ import {
   Expand,
   ExternalLink,
   Eye,
+  EyeOff,
   Globe2,
   Grid2X2,
   Hand,
@@ -33,6 +41,8 @@ import {
   Plus,
   Radio,
   RotateCcw,
+  Ruler,
+  Satellite,
   Search,
   Settings2,
   Sparkles,
@@ -42,8 +52,18 @@ import {
   Zap,
 } from 'lucide-react'
 import UniverseCanvas from './components/UniverseCanvas'
+import DistanceRuler from './components/DistanceRuler'
+import {
+  readSharedViewpoint,
+  readViewpoints,
+  viewpointUrl,
+} from './lib/viewpoints'
+import type { CameraPose, Viewpoint } from './lib/viewpoints'
+import { physicalRadius, scientificConfidence } from './lib/scienceTools'
+import { defaultObserver } from './lib/observer'
+import type { ObserverSite, SkyEvent } from './lib/observer'
 import type { SceneCommand } from './components/UniverseCanvas'
-import type { ViewMode } from './components/spaceScene'
+import type { GalaxyStyle, ViewMode } from './components/spaceScene'
 import type { MapTelemetry } from './components/ContinuousMap'
 import {
   catalog,
@@ -75,6 +95,8 @@ import './App.css'
 const kindIcons: Record<ObjectKind, typeof Globe2> = {
   planet: Globe2,
   exoplanet: Globe2,
+  'rogue-planet': Globe2,
+  spacecraft: Satellite,
   'dwarf-planet': CircleDot,
   comet: Sparkles,
   asteroid: Circle,
@@ -88,6 +110,7 @@ const kindIcons: Record<ObjectKind, typeof Globe2> = {
   galaxy: Orbit,
   cluster: Grid2X2,
   'star-cluster': Sparkles,
+  void: Circle,
   system: Orbit,
   universe: Compass,
 }
@@ -108,6 +131,7 @@ const tourStops = [
 ]
 const timeSpeeds = [
   { value: 1000 / DAY_MS, label: 'Real time' },
+  { value: 1 / 1440, label: '1 minute / sec' },
   { value: 1 / 24, label: '1 hour / sec' },
   { value: 1, label: '1 day / sec' },
   { value: 10, label: '10 days / sec' },
@@ -171,7 +195,15 @@ function ObjectThumb({
       style={{ '--object-color': object.color } as CSSProperties}
     >
       {object.texture ? (
-        <img src={object.texture} alt="" loading="lazy" />
+        <img
+          src={
+            object.texture.startsWith('/') && !object.texture.startsWith('//')
+              ? `${import.meta.env.BASE_URL}${object.texture.slice(1)}`
+              : object.texture
+          }
+          alt=""
+          loading="lazy"
+        />
       ) : (
         <Icon size={small ? 15 : 20} strokeWidth={1.25} />
       )}
@@ -205,7 +237,10 @@ function OrbitDiagram({
     context.scale(ratio, ratio)
     context.clearRect(0, 0, width, height)
     const date = new Date(timestamp)
-    const ephemeris = ['ephemeris', 'kepler'].includes(object.orbit.model)
+    const currentPosition = getPosition(object, date)
+    const ephemeris =
+      ['ephemeris', 'kepler'].includes(object.orbit.model) &&
+      currentPosition.every(Number.isFinite)
     if (ephemeris && path.current?.id !== object.id)
       path.current = { id: object.id, points: sampleOrbit(object, date, 120) }
     context.strokeStyle = '#ffffff08'
@@ -238,7 +273,7 @@ function OrbitDiagram({
         else context.lineTo(horizontal, vertical)
       })
       context.stroke()
-      const position = getPosition(object, date)
+      const position = currentPosition
       const horizontal = centerX + position[0] * scale
       const vertical = centerY + position[2] * scale * 0.52
       context.setLineDash([])
@@ -263,7 +298,11 @@ function OrbitDiagram({
         vertical - 10,
       )
     } else {
-      for (let index = 0; index < 3; index++) {
+      for (
+        let index = 0;
+        object.orbit.model !== 'none' && !object.trajectory && index < 3;
+        index++
+      ) {
         context.beginPath()
         context.ellipse(
           centerX,
@@ -280,14 +319,18 @@ function OrbitDiagram({
       context.fillStyle = '#89948e'
       context.textAlign = 'center'
       context.fillText(
-        object.orbit.model === 'none'
-          ? 'NO SINGLE ORBIT'
-          : 'ILLUSTRATIVE CONTEXT',
+        object.trajectory
+          ? 'OUTSIDE EPHEMERIS COVERAGE'
+          : object.orbit.model === 'none'
+            ? 'NO SINGLE ORBIT'
+            : 'ILLUSTRATIVE CONTEXT',
         centerX,
         height - 12,
       )
     }
     context.setLineDash([])
+    if (object.orbit.model === 'none' || (object.trajectory && !ephemeris))
+      return
     context.beginPath()
     context.arc(centerX, centerY, 5, 0, Math.PI * 2)
     context.fillStyle = object.id === 'moon' ? '#89bedb' : '#e8c891'
@@ -306,6 +349,8 @@ function OrbitDiagram({
   )
 }
 
+const ExplorationTools = lazy(() => import('./components/ExplorationTools'))
+
 function App() {
   const [selectedId, setSelectedId] = useState(() => {
     const id = new URLSearchParams(window.location.search).get('object')
@@ -314,6 +359,7 @@ function App() {
   const [view, setView] = useState<ViewMode>(() => {
     const parameters = new URLSearchParams(window.location.search)
     const requested = parameters.get('view')
+    if (requested === 'sky' || requested === 'compare') return requested
     const target = objectById.get(parameters.get('object') ?? 'solar-system')
     if (requested === 'orbit')
       return target && !['ephemeris', 'kepler'].includes(target.orbit.model)
@@ -341,8 +387,41 @@ function App() {
   )
   const [orbits, setOrbits] = useState(true)
   const [labels, setLabels] = useState(true)
+  const [uiHidden, setUiHidden] = useState(false)
   const [compressed, setCompressed] = useState(true)
   const [highQuality, setHighQuality] = useState(true)
+  const [adaptiveQuality, setAdaptiveQuality] = useState(true)
+  const [galacticDust, setGalacticDust] = useState(true)
+  const [rulerOpen, setRulerOpen] = useState(false)
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const [comparison, setComparison] = useState(['earth', 'jupiter', 'sun'])
+  const [observer, setObserver] = useState<ObserverSite>(defaultObserver)
+  const [skyFocus, setSkyFocus] = useState<'Sun' | 'Moon' | null>(null)
+  const [activeEvent, setActiveEvent] = useState<SkyEvent | null>(null)
+  const [viewpoints, setViewpoints] = useState(readViewpoints)
+  const [shareUrl, setShareUrl] = useState('')
+  const captureRequest = useRef({ name: '', share: false })
+  const sharedStartup = useRef(readSharedViewpoint(window.location.hash))
+  const [rulerEndpoints, setRulerEndpoints] = useState<[string, string]>([
+    'earth',
+    'sun',
+  ])
+  const [galaxyStyle, setGalaxyStyle] = useState<GalaxyStyle>(() => {
+    try {
+      return localStorage.getItem('hello-world-galaxy-style') === 'original'
+        ? 'original'
+        : 'reference'
+    } catch {
+      return 'reference'
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('hello-world-galaxy-style', galaxyStyle)
+    } catch {
+      return
+    }
+  }, [galaxyStyle])
   const [navigation, setNavigation] = useState<'orbit' | 'pan'>('orbit')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sourcesOpen, setSourcesOpen] = useState(false)
@@ -391,6 +470,7 @@ function App() {
     ['ephemeris', 'kepler'].includes(object.orbit.model) &&
     getPosition(object, new Date(timestamp)).every(Number.isFinite)
   const hasSaved = bookmarks.includes(object.id)
+  const confidence = scientificConfidence(object)
   const following = view === 'map' && Boolean(mapPosition?.followingId)
   const canFollow =
     view === 'map' &&
@@ -401,7 +481,7 @@ function App() {
     .filter((item): item is CelestialObject => {
       if (!item) return false
       const local =
-        Boolean(item.body || item.elements) ||
+        Boolean(item.body || item.elements || item.trajectory) ||
         ['moon', 'solar-system'].includes(item.id)
       return (
         (scope === 'all' || (scope === 'nearby' ? local : !local)) &&
@@ -411,16 +491,21 @@ function App() {
       )
     })
   const positionUnavailable =
-    hasExtendedObject(object.id) &&
-    !object.galacticPosition &&
-    ['star', 'exoplanet'].includes(object.kind)
+    (Boolean(object.trajectory) && !canShowOrbit) ||
+    (hasExtendedObject(object.id) &&
+      !object.galacticPosition &&
+      ['star', 'exoplanet'].includes(object.kind))
   const mapFocus = mapPosition?.focusedId
     ? objectById.get(mapPosition.focusedId)
     : undefined
   const sceneTitle =
-    view === 'map'
-      ? (mapFocus?.name ?? mapPosition?.region ?? 'Solar System')
-      : object.name
+    view === 'compare'
+      ? 'True-scale comparison'
+      : view === 'sky'
+        ? (activeEvent?.label ?? 'Sky from Earth')
+        : view === 'map'
+          ? (mapFocus?.name ?? mapPosition?.region ?? 'Solar System')
+          : object.name
 
   function notify(message: string) {
     setNotice(message)
@@ -445,6 +530,7 @@ function App() {
 
   function updateLocation(id: string, nextView: ViewMode) {
     const url = new URL(window.location.href)
+    url.hash = ''
     url.searchParams.set('object', id)
     url.searchParams.set('view', nextView)
     window.history.replaceState(null, '', url)
@@ -452,6 +538,111 @@ function App() {
 
   function cancelStartupNavigation() {
     startupDestination.current = null
+    sharedStartup.current = null
+  }
+
+  function storeViews(next: Viewpoint[]) {
+    setViewpoints(next)
+    try {
+      localStorage.setItem('hello-world-viewpoints', JSON.stringify(next))
+    } catch {
+      notify('View saved for this session. Browser storage is unavailable.')
+    }
+  }
+
+  function captureView(pose: CameraPose) {
+    const point: Viewpoint = {
+      version: 1,
+      name: (captureRequest.current.name.trim() || `${sceneTitle} view`).slice(
+        0,
+        80,
+      ),
+      objectId: selectedId,
+      view,
+      timestamp,
+      comparison: view === 'compare' ? comparison : undefined,
+      observer: view === 'sky' ? observer : undefined,
+      skyFocus: view === 'sky' ? skyFocus : undefined,
+      camera: pose,
+      layers: { orbits, labels, compressed, galacticDust, galaxyStyle },
+    }
+    if (captureRequest.current.share)
+      setShareUrl(viewpointUrl(point, window.location.href))
+    else {
+      storeViews([point, ...viewpoints].slice(0, 30))
+      notify('Viewpoint saved')
+    }
+  }
+
+  function restoreView(point: Viewpoint) {
+    if (!objectById.has(point.objectId)) {
+      notify('This viewpoint object is not available in the catalog.')
+      return
+    }
+    if (
+      point.comparison?.some((id) => {
+        const item = objectById.get(id)
+        return !item || !physicalRadius(item)
+      })
+    ) {
+      notify('A compared body has no usable radius in this catalog.')
+      return
+    }
+    cancelStartupNavigation()
+    setSelectedId(point.objectId)
+    setView(point.view)
+    if (point.comparison) setComparison(point.comparison)
+    if (point.observer) {
+      setObserver(point.observer)
+      setSkyFocus(point.skyFocus ?? null)
+      setActiveEvent(null)
+    }
+    setDate(point.timestamp)
+    setPlaying(false)
+    setOrbits(point.layers.orbits)
+    setLabels(point.layers.labels)
+    setCompressed(point.layers.compressed)
+    setGalacticDust(point.layers.galacticDust)
+    setGalaxyStyle(point.layers.galaxyStyle)
+    setCommand((current) => ({
+      action: 'restore-view',
+      serial: (current?.serial ?? 0) + 1,
+      viewpoint: point,
+    }))
+    window.history.replaceState(
+      null,
+      '',
+      viewpointUrl(point, window.location.href),
+    )
+  }
+  function observe(site: ObserverSite, event?: SkyEvent) {
+    cancelStartupNavigation()
+    setToolsOpen(false)
+    setObserver(site)
+    setActiveEvent(event ?? null)
+    setSkyFocus(event ? (event.kind === 'lunar' ? 'Moon' : 'Sun') : null)
+    if (event) {
+      setDate(event.peak)
+      setPlaying(false)
+    } else setSpeed(1 / 1440)
+    setSelectedId('earth')
+    setView('sky')
+    updateLocation('earth', 'sky')
+  }
+  const restoreShared = useEffectEvent(() => {
+    const point = sharedStartup.current
+    if (point) restoreView(point)
+  })
+
+  function visitMission(id: string, time: number, overview: boolean) {
+    cancelStartupNavigation()
+    setDate(time)
+    setPlaying(false)
+    setSelectedId(id)
+    setView(overview ? 'orbit' : 'map')
+    setSkyFocus(null)
+    updateLocation(id, overview ? 'orbit' : 'map')
+    if (overview) setToolsOpen(false)
   }
 
   function sendCommand(action: SceneCommand['action'], distancePc?: number) {
@@ -473,9 +664,9 @@ function App() {
   function toggleFollow() {
     cancelStartupNavigation()
     setCommand((current) => ({
-      action: 'follow',
+      action: 'toggle-follow',
       serial: (current?.serial ?? 0) + 1,
-      bodyId: following ? null : object.id,
+      bodyId: object.id,
     }))
   }
 
@@ -512,9 +703,20 @@ function App() {
     }
   }
 
+  function toggleUi() {
+    setUiHidden((current) => !current)
+    setSettingsOpen(false)
+    setShowSidebar(false)
+    setMobileDetails(false)
+    setSourcesOpen(false)
+  }
+
   const onKey = useEffectEvent((event: KeyboardEvent) => {
     const target = event.target as HTMLElement
     if (event.key === 'Escape') {
+      setToolsOpen(false)
+      setRulerOpen(false)
+      setUiHidden(false)
       setSettingsOpen(false)
       setShowSidebar(false)
       setMobileDetails(false)
@@ -527,7 +729,14 @@ function App() {
       document.querySelector('dialog[open]')
     )
       return
-    if (event.key === '/') {
+    const unmodified = !event.altKey && !event.ctrlKey && !event.metaKey
+    if (event.key.toLowerCase() === 'h' && unmodified && !event.repeat) {
+      event.preventDefault()
+      toggleUi()
+    }
+    if (event.key.toLowerCase() === 'o' && unmodified && !event.repeat)
+      setOrbits((current) => !current)
+    if (event.key === '/' && !uiHidden) {
       event.preventDefault()
       setShowSidebar(true)
       searchRef.current?.focus()
@@ -554,6 +763,10 @@ function App() {
       .then((metadata) => {
         if (!active) return
         setCatalogMetadata(metadata)
+        if (sharedStartup.current) {
+          restoreShared()
+          return
+        }
         const id = startupDestination.current
         startupDestination.current = null
         if (id && objectById.has(id)) setSelectedId(id)
@@ -633,7 +846,7 @@ function App() {
 
   return (
     <main
-      className={`observatory ${view === 'map' ? 'map-mode' : ''} ${showInspector ? '' : 'inspector-hidden'} ${showSidebar ? 'sidebar-open' : ''}`}
+      className={`observatory ${view === 'map' ? 'map-mode' : ''} ${showInspector ? '' : 'inspector-hidden'} ${showSidebar ? 'sidebar-open' : ''} ${uiHidden ? 'ui-hidden' : ''} ${rulerOpen && view === 'map' ? 'ruler-open' : ''} ${toolsOpen ? 'tools-open' : ''} ${view === 'sky' || view === 'compare' ? 'science-view' : ''}`}
     >
       <UniverseCanvas
         object={destination}
@@ -641,11 +854,20 @@ function App() {
         timestamp={timestamp}
         options={{
           orbits,
-          labels,
+          labels: labels && !uiHidden,
+          uiHidden,
           compressed,
           playing,
           highQuality,
-          inspectorOpen: showInspector,
+          adaptiveQuality,
+          comparison,
+          observer,
+          skyFocus,
+          ruler:
+            rulerOpen && view === 'map' && !uiHidden ? rulerEndpoints : null,
+          galaxyStyle,
+          galacticDust,
+          inspectorOpen: showInspector && view !== 'sky' && view !== 'compare',
           catalogRevision: catalogMetadata ? 1 : 0,
           navigation,
         }}
@@ -654,8 +876,59 @@ function App() {
         onNotice={notify}
         onMapPosition={setMapPosition}
         onNavigate={cancelStartupNavigation}
+        onCaptureView={captureView}
       />
       <div className="scene-vignette" />
+      {toolsOpen && (
+        <Suspense
+          fallback={
+            <section className="exploration-tools" role="status">
+              Loading tools...
+            </section>
+          }
+        >
+          <ExplorationTools
+            views={viewpoints}
+            shareUrl={shareUrl}
+            onNotice={notify}
+            onClose={() => setToolsOpen(false)}
+            onRestore={restoreView}
+            comparison={comparison}
+            onCompare={(ids, show) => {
+              setComparison(ids)
+              if (show) {
+                setInspectionView('compare')
+                setToolsOpen(false)
+              }
+            }}
+            observer={observer}
+            timestamp={timestamp}
+            onObserve={observe}
+            activeEvent={activeEvent}
+            onMission={visitMission}
+            onEventTime={(time) => {
+              if (activeEvent) observe(activeEvent.site, activeEvent)
+              setDate(time)
+              setPlaying(false)
+              setToolsOpen(false)
+              setCommand((current) => ({
+                action: 'reset',
+                serial: (current?.serial ?? 0) + 1,
+              }))
+            }}
+            onDelete={(index) =>
+              storeViews(
+                viewpoints.filter((_, itemIndex) => index !== itemIndex),
+              )
+            }
+            onCapture={(name, share) => {
+              captureRequest.current = { name, share }
+              setPlaying(false)
+              sendCommand('capture-view')
+            }}
+          />
+        </Suspense>
+      )}
       <header className="topbar">
         <div className="brand-wrap">
           <IconButton
@@ -682,6 +955,20 @@ function App() {
           <span className="brand-caption">UNIVERSE EXPLORER</span>
         </div>
         <nav className="main-nav" aria-label="Main navigation">
+          <button
+            title="Exploration tools"
+            aria-label="Exploration tools"
+            className={toolsOpen ? 'selected' : ''}
+            onClick={() => {
+              setToolsOpen((current) => !current)
+              setRulerOpen(false)
+              setShowSidebar(false)
+              setSettingsOpen(false)
+            }}
+          >
+            <Telescope size={15} />
+            <span>Tools</span>
+          </button>
           <button
             className={activeTab === 'explore' ? 'selected' : ''}
             aria-label="Explore"
@@ -1028,20 +1315,28 @@ function App() {
       <div className="scene-heading" key={sceneTitle}>
         <span className="eyebrow">
           <span className="tiny-cross">+</span>
-          {view === 'map'
-            ? (mapFocus?.classification.toUpperCase() ??
-              'SUN-CENTERED GALACTIC FRAME')
-            : object.classification.toUpperCase()}
+          {view === 'sky'
+            ? 'EARTH OBSERVER / ALT-AZ'
+            : view === 'compare'
+              ? 'PHYSICAL RADII / LINEAR SCALE'
+              : view === 'map'
+                ? (mapFocus?.classification.toUpperCase() ??
+                  'SUN-CENTERED GALACTIC FRAME')
+                : object.classification.toUpperCase()}
         </span>
         <h1>{sceneTitle}</h1>
         <p>
-          {positionUnavailable && view === 'map'
-            ? '3D position unavailable / distance not constrained'
-            : view === 'map'
-              ? (mapFocus?.subtitle ??
-                mapPosition?.span ??
-                'Metric coordinates')
-              : object.subtitle}
+          {view === 'sky'
+            ? `${observer.latitude.toFixed(4)} deg, ${observer.longitude.toFixed(4)} deg`
+            : view === 'compare'
+              ? 'Reference radii; illustrative spacing'
+              : positionUnavailable && view === 'map'
+                ? '3D position unavailable / distance not constrained'
+                : view === 'map'
+                  ? (mapFocus?.subtitle ??
+                    mapPosition?.span ??
+                    'Metric coordinates')
+                  : object.subtitle}
         </p>
       </div>
       <div className="scene-coordinate">
@@ -1061,6 +1356,29 @@ function App() {
         )}
       </div>
       <div className="viewer-tools" role="toolbar" aria-label="Camera controls">
+        {view === 'map' && (
+          <IconButton
+            label="Distance ruler"
+            active={rulerOpen}
+            aria-pressed={rulerOpen}
+            onClick={() => {
+              setRulerOpen((current) => !current)
+              setSettingsOpen(false)
+              setShowSidebar(false)
+            }}
+          >
+            <Ruler size={18} />
+          </IconButton>
+        )}
+        <IconButton
+          label={uiHidden ? 'Show UI' : 'Hide UI'}
+          className="ui-toggle"
+          active={uiHidden}
+          aria-pressed={uiHidden}
+          onClick={toggleUi}
+        >
+          {uiHidden ? <Eye size={18} /> : <EyeOff size={18} />}
+        </IconButton>
         {view === 'map' && (
           <IconButton
             label={
@@ -1101,6 +1419,15 @@ function App() {
           {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
         </IconButton>
       </div>
+      {rulerOpen && view === 'map' && (
+        <DistanceRuler
+          endpoints={rulerEndpoints}
+          measurement={mapPosition?.measurement ?? null}
+          onChange={setRulerEndpoints}
+          onFrame={() => sendCommand('frame-ruler')}
+          onClose={() => setRulerOpen(false)}
+        />
+      )}
       <div className="view-layers">
         {view === 'map' && (
           <button
@@ -1119,7 +1446,8 @@ function App() {
         <button
           className={orbits ? 'enabled' : ''}
           role="switch"
-          aria-label="Orbits"
+          aria-label="Solar-system orbits"
+          title="All cataloged solar-system orbits"
           aria-checked={orbits}
           onClick={() => setOrbits((current) => !current)}
         >
@@ -1131,6 +1459,7 @@ function App() {
           className={labels ? 'enabled' : ''}
           role="switch"
           aria-label="Labels"
+          title="Object names"
           aria-checked={labels}
           onClick={() => setLabels((current) => !current)}
         >
@@ -1158,7 +1487,7 @@ function App() {
                 </IconButton>
               </div>
               <label>
-                <span>Orbit lines</span>
+                <span>All solar-system orbits</span>
                 <input
                   type="checkbox"
                   checked={orbits}
@@ -1166,7 +1495,7 @@ function App() {
                 />
               </label>
               <label>
-                <span>Object labels</span>
+                <span>Object names</span>
                 <input
                   type="checkbox"
                   checked={labels}
@@ -1181,6 +1510,44 @@ function App() {
                   onChange={(event) => setHighQuality(event.target.checked)}
                 />
               </label>
+              <label>
+                <span>Adaptive rendering</span>
+                <input
+                  type="checkbox"
+                  checked={adaptiveQuality}
+                  onChange={(event) => setAdaptiveQuality(event.target.checked)}
+                />
+              </label>
+              <div className="setting-label">Milky Way style</div>
+              <label>
+                <span>Galactic dust</span>
+                <input
+                  type="checkbox"
+                  checked={galacticDust && galaxyStyle === 'reference'}
+                  disabled={galaxyStyle !== 'reference'}
+                  onChange={(event) => setGalacticDust(event.target.checked)}
+                />
+              </label>
+              <div
+                className="segmented-control"
+                role="group"
+                aria-label="Milky Way style"
+              >
+                <button
+                  className={galaxyStyle === 'original' ? 'active' : ''}
+                  aria-pressed={galaxyStyle === 'original'}
+                  onClick={() => setGalaxyStyle('original')}
+                >
+                  Original
+                </button>
+                <button
+                  className={galaxyStyle === 'reference' ? 'active' : ''}
+                  aria-pressed={galaxyStyle === 'reference'}
+                  onClick={() => setGalaxyStyle('reference')}
+                >
+                  Reference
+                </button>
+              </div>
               {view !== 'map' && (
                 <>
                   <div className="setting-label">Solar-system distances</div>
@@ -1276,6 +1643,17 @@ function App() {
               <LocateFixed size={12} />
               {object.location}
             </div>
+            <dl
+              className="confidence-badges"
+              aria-label="Scientific confidence"
+            >
+              {Object.entries(confidence).map(([kind, value]) => (
+                <div key={kind}>
+                  <dt>{kind}</dt>
+                  <dd>{value}</dd>
+                </div>
+              ))}
+            </dl>
             <div
               className="inspector-tabs"
               role="tablist"
@@ -1421,6 +1799,26 @@ function App() {
               Source / Reference data
               <ExternalLink size={11} />
             </a>
+            {object.coordinateSource && (
+              <a
+                className="source-link"
+                href={object.coordinateSource}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Coordinates / Ephemeris source <ExternalLink size={11} />
+              </a>
+            )}
+            {object.model && (
+              <a
+                className="source-link"
+                href={object.model.source}
+                target="_blank"
+                rel="noreferrer"
+              >
+                3D asset / {object.model.credit} <ExternalLink size={11} />
+              </a>
+            )}
           </div>
         </aside>
       ) : (
@@ -1640,6 +2038,33 @@ function App() {
             illustrative initial orientation.
           </p>
           <h3>Imagery & rendering</h3>
+          <p>
+            Voyager geometry is provided by NASA Visualization Technology
+            Applications and Development (VTAD). Its heliocentric positions use
+            locally bundled, bounded NASA/JPL Horizons mission snapshots, with
+            interpolation between samples and no extrapolation. Model attitude
+            and lighting are illustrative. The Pillars of Creation particles are
+            derived from the NASA-hosted reconstruction by Leah Hustak and Ralf
+            Crawford, Space Telescope Science Institute. Printing supports and
+            the lower basal section were removed; emission colors are
+            illustrative. These assets follow the{' '}
+            <a
+              href="https://www.nasa.gov/nasa-brand-center/images-and-media/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              NASA media-use guidelines
+            </a>
+            . No NASA endorsement is implied.
+          </p>
+          <p>
+            Rogue-planet candidates are isolated substellar objects with
+            uncertain formation histories; their infrared-inspired clouds and
+            nominal radii are illustrative. Dormant black holes have no bright
+            disk or jets; their background stars are schematic. The Bootes Void
+            is a galaxy underdensity, not an empty sphere or black hole, and its
+            depicted galaxy distribution is not a survey.
+          </p>
           <p>
             Planet texture maps by{' '}
             <a

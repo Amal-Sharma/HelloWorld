@@ -9,6 +9,9 @@
     "test": "vitest run src",
     "test:e2e": "playwright test",
     "sync:catalog": "node scripts/sync-catalog.mjs",
+    "sync:spacecraft": "node scripts/sync-spacecraft.mjs",
+    "sync:nebula": "node scripts/sample-pillars.mjs",
+    "sync:saturn-moons": "node scripts/sync-saturn-moons.mjs",
     "lint": "eslint src scripts tests vite.config.ts playwright.config.ts --max-warnings 0",
     "preview": "vite preview"
   },
@@ -37,6 +40,7 @@
     "eslint-plugin-react-refresh": "0.4.24",
     "globals": "16.4.0",
     "prettier": "^3.9.7",
+    "sharp": "^0.35.4",
     "typescript": "~5.9.3",
     "typescript-eslint": "8.46.1",
     "vite": "^6.4.1",

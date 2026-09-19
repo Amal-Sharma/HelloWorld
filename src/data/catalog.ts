@@ -1,4 +1,8 @@
 import { Body } from 'astronomy-engine'
+import voyagerOne from './trajectories/voyager-1.json'
+import voyagerTwo from './trajectories/voyager-2.json'
+import newHorizons from './trajectories/new-horizons.json'
+import saturnMoons from './saturn-moons.json'
 import {
   getExtendedObject,
   hasExtendedObject,
@@ -8,6 +12,8 @@ import {
 export type ObjectKind =
   | 'planet'
   | 'exoplanet'
+  | 'rogue-planet'
+  | 'spacecraft'
   | 'dwarf-planet'
   | 'comet'
   | 'asteroid'
@@ -21,10 +27,12 @@ export type ObjectKind =
   | 'galaxy'
   | 'cluster'
   | 'star-cluster'
+  | 'void'
   | 'system'
   | 'universe'
 export type SceneKind =
   | 'planet'
+  | 'spacecraft'
   | 'comet'
   | 'star'
   | 'black-hole'
@@ -34,6 +42,7 @@ export type SceneKind =
   | 'galaxy'
   | 'cluster'
   | 'star-cluster'
+  | 'void'
   | 'system'
   | 'universe'
 
@@ -47,6 +56,7 @@ export interface OrbitalElements {
   epoch: number
   perihelionTime: number
   perihelionDistance: number
+  meanMotionDegreesPerDay?: number
 }
 
 export interface OrbitData {
@@ -80,6 +90,17 @@ export interface CelestialObject {
   galacticPosition?: [number, number, number]
   elements?: OrbitalElements
   jovianMoon?: 'io' | 'europa' | 'ganymede' | 'callisto'
+  saturnianMoon?: 'titan' | 'enceladus'
+  trajectory?: readonly (readonly [number, number, number, number])[]
+  model?: {
+    path: string
+    format: 'gltf' | 'particles'
+    source: string
+    credit: string
+  }
+  blackHole?: { massSolar: number; accreting: boolean; jets?: boolean }
+  morphology?: 'shell' | 'bipolar' | 'filaments'
+  coordinateSource?: string
   skyPosition?: {
     rightAscensionHours: number
     declinationDegrees: number
@@ -97,17 +118,20 @@ export const categories: { kind: ObjectKind; label: string }[] = [
   { kind: 'comet', label: 'Comets' },
   { kind: 'asteroid', label: 'Asteroids' },
   { kind: 'exoplanet', label: 'Exoplanets' },
+  { kind: 'rogue-planet', label: 'Rogue planets' },
+  { kind: 'spacecraft', label: 'Spacecraft' },
   { kind: 'moon', label: 'Moons' },
   { kind: 'star', label: 'Stars' },
   { kind: 'system', label: 'Solar systems' },
   { kind: 'black-hole', label: 'Black holes' },
   { kind: 'nebula', label: 'Nebulae' },
-  { kind: 'supernova', label: 'Supernovae' },
+  { kind: 'supernova', label: 'Supernova remnants' },
   { kind: 'neutron-star', label: 'Neutron stars' },
   { kind: 'quasar', label: 'Quasars' },
   { kind: 'galaxy', label: 'Galaxies' },
   { kind: 'cluster', label: 'Groups & clusters' },
   { kind: 'star-cluster', label: 'Star clusters' },
+  { kind: 'void', label: 'Cosmic voids' },
   { kind: 'universe', label: 'Observable universe' },
 ]
 
@@ -1144,6 +1168,172 @@ catalog.push(
   })),
 )
 
+catalog.push(
+  ...(['titan', 'enceladus'] as const).map((id): CelestialObject => ({
+    id,
+    name: id === 'titan' ? 'Titan' : 'Enceladus',
+    kind: 'moon',
+    scene: 'planet',
+    saturnianMoon: id,
+    classification:
+      id === 'titan'
+        ? 'Saturnian moon / thick nitrogen atmosphere'
+        : 'Saturnian icy moon / ocean world',
+    subtitle:
+      id === 'titan'
+        ? 'A world beneath orange haze.'
+        : 'An ocean beneath the ice.',
+    description:
+      id === 'titan'
+        ? "Saturn's largest moon has a dense nitrogen atmosphere, organic haze, and methane lakes. Its NASA VTAD surface map is shown beneath illustrative haze. Positions use a Saturn-centered osculating Kepler approximation from JPL Horizons, not a full perturbed satellite ephemeris."
+        : "Enceladus has a bright fractured ice shell above a global ocean, with south-polar plumes detected by Cassini. The surface map is extracted from NASA's official 3D asset. Motion uses Saturn-centered JPL elements propagated approximately; no long-term satellite accuracy is implied.",
+    location: 'Saturn / Solar System',
+    distance: `~${(saturnMoons[id].elements.semiMajorAxis * 149597870.7).toLocaleString('en-US', { maximumFractionDigits: 0 })} km from Saturn`,
+    color: id === 'titan' ? '#d5ab6a' : '#d4e3e7',
+    texture: saturnMoons[id].texture,
+    parent: 'saturn',
+    radiusKm: id === 'titan' ? 2574.73 : 252.1,
+    rotationHours: saturnMoons[id].periodDays * 24,
+    elements: saturnMoons[id].elements,
+    coordinateSource: 'https://ssd.jpl.nasa.gov/horizons/',
+    facts: [
+      {
+        label: 'Mean radius',
+        value: id === 'titan' ? '2,574.73 km' : '252.1 km',
+      },
+      {
+        label: 'Orbital period',
+        value: `${saturnMoons[id].periodDays.toFixed(4)} days`,
+      },
+      { label: 'Surface source', value: 'NASA VTAD 3D asset' },
+      {
+        label: 'Motion model',
+        value: 'Approximate Saturn-centered Kepler orbit',
+      },
+    ],
+    orbit: {
+      parent: 'Saturn',
+      period: `${saturnMoons[id].periodDays.toFixed(4)} days`,
+      periodDays: saturnMoons[id].periodDays,
+      semiMajorAxis: saturnMoons[id].elements.semiMajorAxis,
+      eccentricity: saturnMoons[id].elements.eccentricity,
+      inclination: saturnMoons[id].elements.inclination,
+      speed: id === 'titan' ? '~5.6 km/s' : '~12.6 km/s',
+      model: 'kepler',
+      note: 'Saturn-centered J2000 ecliptic elements from JPL Horizons at 2026-09-16 TDB, propagated with the tabulated mean motion. Satellite perturbations and precession are omitted; accuracy degrades away from the element epoch. Surface orientation is illustrative.',
+    },
+    source: `https://science.nasa.gov/saturn/moons/${id}/`,
+  })),
+)
+
+const voyagerTrajectories = { 'voyager-1': voyagerOne, 'voyager-2': voyagerTwo }
+catalog.push(
+  ...(['voyager-1', 'voyager-2'] as const).map((id): CelestialObject => ({
+    id,
+    name: id === 'voyager-1' ? 'Voyager 1' : 'Voyager 2',
+    kind: 'spacecraft',
+    scene: 'spacecraft',
+    classification: 'Interstellar spacecraft / NASA Voyager',
+    subtitle: 'A human-made traveler beyond the heliopause.',
+    description:
+      id === 'voyager-1'
+        ? "Launched in 1977, Voyager 1 explored Jupiter and Saturn before crossing the heliopause in 2012. Its open escape trajectory is sampled from NASA/JPL Horizons; the spacecraft geometry is NASA's Voyager model. Attitude and model lighting are illustrative."
+        : "Voyager 2 visited all four giant planets before crossing the heliopause in 2018. Its open escape trajectory is sampled from NASA/JPL Horizons; the twin spacecraft share NASA's Voyager model. Attitude and model lighting are illustrative.",
+    location: 'Interstellar space / Solar escape trajectory',
+    distance:
+      id === 'voyager-1'
+        ? '~172 AU from Sun (Sep 2026)'
+        : '~144 AU from Sun (Sep 2026)',
+    color: id === 'voyager-1' ? '#ddd7b4' : '#a9d5d8',
+    parent: 'solar-system',
+    radiusKm: 0.009,
+    trajectory: voyagerTrajectories[id].samples.map((sample) => [
+      sample[0],
+      sample[1],
+      sample[2],
+      sample[3],
+    ]),
+    model: {
+      path: 'models/voyager.glb',
+      format: 'gltf',
+      source: 'https://science.nasa.gov/resource/voyager-3d-model/',
+      credit:
+        'NASA Visualization Technology Applications and Development (VTAD)',
+    },
+    coordinateSource: 'https://ssd.jpl.nasa.gov/horizons/',
+    facts: [
+      {
+        label: 'Launched',
+        value: id === 'voyager-1' ? '5 September 1977' : '20 August 1977',
+      },
+      {
+        label: 'Heliopause crossing',
+        value: id === 'voyager-1' ? '25 August 2012' : '5 November 2018',
+      },
+      { label: 'Antenna diameter', value: '3.7 m' },
+      {
+        label: 'Position coverage',
+        value: `${id === 'voyager-1' ? '1977-09-06' : '1977-08-21'} to 2030-01-01 UTC`,
+      },
+      { label: '3D geometry', value: 'NASA VTAD model; illustrative attitude' },
+    ],
+    orbit: {
+      parent: 'Sun',
+      period: 'Unbound escape trajectory',
+      speed:
+        id === 'voyager-1'
+          ? '~17 km/s relative to Sun'
+          : '~15 km/s relative to Sun',
+      model: 'ephemeris',
+      note: 'Geometric heliocentric J2000 ecliptic vectors from NASA/JPL Horizons. At most four-day spacing, with hourly samples around the giant-planet encounters. Linear interpolation; no extrapolation outside the mission snapshot from shortly after launch through 2030-01-01. This is an open trajectory, not live telemetry.',
+    },
+    source: `https://science.nasa.gov/mission/voyager/${id}/`,
+  })),
+)
+
+catalog.push({
+  id: 'new-horizons',
+  name: 'New Horizons',
+  kind: 'spacecraft',
+  scene: 'spacecraft',
+  classification: 'Kuiper Belt spacecraft / NASA New Horizons',
+  subtitle: 'Beyond Pluto, into the Kuiper Belt.',
+  description:
+    'New Horizons launched in January 2006, used Jupiter for a gravity assist in 2007, flew past Pluto in July 2015, and encountered Arrokoth in January 2019. Geometry is the NASA VTAD model; positions come from a bounded JPL Horizons snapshot. Attitude and lighting are illustrative.',
+  location: 'Outer Solar System / Kuiper Belt',
+  distance: 'Date-dependent heliocentric trajectory',
+  color: '#d5bd83',
+  parent: 'solar-system',
+  radiusKm: 0.003,
+  trajectory: newHorizons.samples.map((sample) => [
+    sample[0],
+    sample[1],
+    sample[2],
+    sample[3],
+  ]),
+  model: {
+    path: 'models/new-horizons.glb',
+    format: 'gltf',
+    source: 'https://science.nasa.gov/resource/new-horizons-3d-model/',
+    credit: 'NASA VTAD',
+  },
+  coordinateSource: 'https://ssd.jpl.nasa.gov/horizons/',
+  facts: [
+    { label: 'Launched', value: '19 January 2006' },
+    { label: 'Pluto flyby', value: '14 July 2015' },
+    { label: 'Arrokoth flyby', value: '1 January 2019' },
+    { label: 'Position coverage', value: '2006-01-20 to 2030-01-01 UTC' },
+  ],
+  orbit: {
+    parent: 'Sun',
+    period: 'Unbound escape trajectory',
+    speed: 'Date-dependent',
+    model: 'ephemeris',
+    note: 'Horizons geometric vectors sampled at most every four days, with hourly samples within two days of Jupiter, Pluto and Arrokoth flybys. Linear interpolation; no extrapolation. Model attitude is not reconstructed telemetry.',
+  },
+  source: 'https://science.nasa.gov/mission/new-horizons/',
+})
+
 const deepSky: {
   id: string
   name: string
@@ -1158,7 +1348,390 @@ const deepSky: {
   parent: string
   description: string
   source: string
+  identifier?: string
+  radiusKm?: number
+  blackHole?: CelestialObject['blackHole']
+  morphology?: CelestialObject['morphology']
+  model?: CelestialObject['model']
+  facts?: CelestialObject['facts']
+  orbit?: OrbitData
 }[] = [
+  {
+    id: 'pso-j318',
+    name: 'PSO J318.5-22',
+    kind: 'rogue-planet',
+    scene: 'planet',
+    type: 'Free-floating planetary-mass object / rogue planet candidate',
+    ra: 318.53344 / 15,
+    dec: -22.859955,
+    distance: 1000 / 45.1,
+    radius: 100000 / 3.085677581491367e13,
+    radiusKm: 100000,
+    color: '#bb8268',
+    parent: 'milky-way',
+    identifier: 'PSO J318.5338-22.8603',
+    description:
+      'A young, isolated planetary-mass object observed through its own infrared heat, with no detected host star. Often called a rogue planet, it may have formed like a low-mass brown dwarf rather than being ejected from a planetary system. Its clouds, radius, and visible colors here are illustrative, not resolved surface observations.',
+    facts: [
+      { label: 'Mass estimate', value: '~6-8 Jupiter masses; model-dependent' },
+      { label: 'Host star', value: 'None detected' },
+      { label: 'Appearance', value: 'Illustrative infrared-inspired clouds' },
+    ],
+    orbit: noOrbit(
+      'No stellar orbit is known. The map uses a reference direction and parallax distance, without an invented host star or closed orbital path.',
+      'Milky Way',
+    ),
+    source:
+      'https://simbad.cds.unistra.fr/simbad/sim-id?Ident=PSO%20J318.5338-22.8603',
+  },
+  {
+    id: 'wise-0855',
+    name: 'WISE 0855-0714',
+    kind: 'rogue-planet',
+    scene: 'planet',
+    type: 'Isolated planetary-mass brown dwarf / rogue planet candidate',
+    ra: 133.81890825 / 15,
+    dec: -7.247048,
+    distance: 1000 / 439,
+    radius: 71492 / 3.085677581491367e13,
+    radiusKm: 71492,
+    color: '#759baf',
+    parent: 'milky-way',
+    identifier: 'WISE J085510.83-071442.5',
+    description:
+      'One of the coldest nearby substellar objects, detected mainly at infrared wavelengths. Its estimated mass overlaps the planetary range, but its formation history is unknown; it is not a confirmed ejected planet. Cloud patterns and the nominal Jupiter-size radius are illustrative. Its high proper motion is not propagated from this catalog reference position.',
+    facts: [
+      { label: 'Temperature', value: '~250 K' },
+      {
+        label: 'Classification',
+        value: 'Planetary-mass brown dwarf; origin uncertain',
+      },
+      {
+        label: 'Visible appearance',
+        value: 'Enhanced; intrinsically very faint',
+      },
+    ],
+    orbit: noOrbit(
+      'No host star or stellar orbit has been established. A fixed catalog position is used; proper motion and an individual Galactic orbit are not propagated.',
+      'Milky Way',
+    ),
+    source: 'https://science.nasa.gov/mission/wise/',
+  },
+  {
+    id: 'gaia-bh1',
+    name: 'Gaia BH1',
+    kind: 'black-hole',
+    scene: 'black-hole',
+    type: 'Dormant stellar-mass black hole',
+    ra: 262.1712358858566 / 15,
+    dec: -0.5809787161,
+    distance: 483,
+    radius: (2.95325 * 9.62) / 3.085677581491367e13,
+    color: '#c7ced9',
+    parent: 'milky-way',
+    identifier: 'Gaia DR3 4373465352415301632',
+    blackHole: { massSolar: 9.62, accreting: false },
+    description:
+      'A nearby dormant black hole detected through the motion of its Sun-like companion. No bright accretion disk is observed. The map places the binary at its catalog direction and distance; its dark horizon and the companion context are illustrative, not a resolved photograph.',
+    facts: [
+      { label: 'Black-hole mass', value: '~9.6 solar masses' },
+      { label: 'Companion period', value: '~186 days' },
+      { label: 'Accretion', value: 'Dormant; no luminous disk modeled' },
+    ],
+    source: 'https://science.nasa.gov/universe/black-holes/',
+  },
+  {
+    id: 'gaia-bh3',
+    name: 'Gaia BH3',
+    kind: 'black-hole',
+    scene: 'black-hole',
+    type: 'Dormant stellar-mass black hole',
+    ra: 294.82796478104 / 15,
+    dec: 14.93166971992,
+    distance: 590,
+    radius: (2.95325 * 32.7) / 3.085677581491367e13,
+    color: '#d7c9ad',
+    parent: 'milky-way',
+    identifier: 'Gaia DR3 4318465066420528000',
+    blackHole: { massSolar: 32.7, accreting: false },
+    description:
+      'A massive stellar-remnant black hole discovered from the wobble of a metal-poor companion star. Its estimated mass is about 33 Suns. It is dormant, so the visualization does not invent a luminous accretion disk or jets; the binary context is schematic.',
+    facts: [
+      { label: 'Black-hole mass', value: '~33 solar masses' },
+      { label: 'Companion period', value: '~11.6 years' },
+      { label: 'Accretion', value: 'Dormant' },
+    ],
+    source: 'https://www.eso.org/public/news/eso2408/',
+  },
+  {
+    id: 'v404-cygni',
+    name: 'V404 Cygni',
+    kind: 'black-hole',
+    scene: 'black-hole',
+    type: 'Stellar-mass black hole / X-ray binary',
+    ra: 306.0159362656 / 15,
+    dec: 33.8672114319,
+    distance: 2390,
+    radius: (2.95325 * 9) / 3.085677581491367e13,
+    color: '#e8b584',
+    parent: 'milky-way',
+    identifier: 'V404 Cyg',
+    blackHole: { massSolar: 9, accreting: true, jets: true },
+    description:
+      'A black-hole binary known for dramatic X-ray outbursts and changing jets. Gas transferred from its companion can form an accretion disk. The bright flowing disk and jets show an illustrative active state, not current observations or a live light curve.',
+    facts: [
+      { label: 'Black-hole mass', value: '~9 solar masses' },
+      { label: 'Binary period', value: '~6.47 days' },
+      { label: 'Rendered state', value: 'Illustrative outburst' },
+    ],
+    source: 'https://science.nasa.gov/universe/black-holes/',
+  },
+  {
+    id: 'centaurus-a-black-hole',
+    name: 'Centaurus A Black Hole',
+    kind: 'black-hole',
+    scene: 'black-hole',
+    type: 'Supermassive black hole / active galactic nucleus',
+    ra: 13.425,
+    dec: -43.02,
+    distance: 3800000,
+    radius: (2.95325 * 55e6) / 3.085677581491367e13,
+    color: '#edc69b',
+    parent: 'centaurus-a',
+    identifier: 'NGC 5128',
+    blackHole: { massSolar: 55e6, accreting: true, jets: true },
+    description:
+      'The active central engine of Centaurus A powers jets and enormous radio lobes. It is placed at the center of its host galaxy, not at a separate arbitrary location. The immediate accretion flow and jet geometry are illustrative.',
+    facts: [
+      { label: 'Mass estimate', value: '~55 million solar masses' },
+      { label: 'Host', value: 'Centaurus A / NGC 5128' },
+    ],
+    source: 'https://science.nasa.gov/universe/galaxies/active-galaxies/',
+  },
+  {
+    id: 'ngc-1275',
+    name: 'NGC 1275',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Active giant galaxy / Perseus A',
+    ra: 49.95066662585 / 15,
+    dec: 41.51169690301,
+    distance: 73000000,
+    radius: 30000,
+    color: '#d4c9b5',
+    parent: 'perseus-cluster',
+    identifier: 'NGC 1275',
+    description:
+      'An active galaxy at the center of the Perseus Cluster. Its black hole drives jets that displace the surrounding hot gas. The stellar halo shown here is a reconstruction; the complex observed gas filaments are not a complete measured volume.',
+    source:
+      'https://science.nasa.gov/universe/galaxies/large-scale-structures/',
+  },
+  {
+    id: 'perseus-a-black-hole',
+    name: 'Perseus A Black Hole',
+    kind: 'black-hole',
+    scene: 'black-hole',
+    type: 'Supermassive black hole / NGC 1275 nucleus',
+    ra: 49.95066662585 / 15,
+    dec: 41.51169690301,
+    distance: 73000000,
+    radius: (2.95325 * 800e6) / 3.085677581491367e13,
+    color: '#d9b5e2',
+    parent: 'ngc-1275',
+    identifier: 'NGC 1275',
+    blackHole: { massSolar: 800e6, accreting: true, jets: true },
+    description:
+      'The central black hole of NGC 1275 helps shape the hot atmosphere of the Perseus Cluster. Its mass estimate depends on the measurement method. The map shares its host center and shows illustrative accretion flow and jets, not a literal visible-light surface.',
+    facts: [
+      { label: 'Mass estimate', value: '~800 million solar masses; uncertain' },
+      { label: 'Host', value: 'NGC 1275 / Perseus A' },
+    ],
+    source: 'https://science.nasa.gov/universe/galaxies/active-galaxies/',
+  },
+  {
+    id: 'pillars-of-creation',
+    name: 'Pillars of Creation',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Star-forming dust pillars / Eagle Nebula',
+    ra: 18.3142,
+    dec: -13.835,
+    distance: 1750,
+    radius: 1.1,
+    color: '#cbaa87',
+    parent: 'eagle-nebula',
+    description:
+      'Dense gas and dust columns within the Eagle Nebula are sculpted by radiation from young stars. This volume is sampled from the NASA-hosted STScI 3D reconstruction by Leah Hustak and Ralf Crawford. The reconstructed shape is retained; translucent particles, ionized edges, and color are visualization choices, not a complete physical gas-density measurement.',
+    model: {
+      path: 'models/pillars-particles.json',
+      format: 'particles',
+      source: 'https://science.nasa.gov/3d-resources/pillars-of-creation/',
+      credit: 'Leah Hustak and Ralf Crawford / STScI; NASA 3D Resources',
+    },
+    facts: [
+      { label: '3D shape', value: 'NASA-hosted STScI reconstruction' },
+      {
+        label: 'Visualization',
+        value: 'Sampled geometry; illustrative emission',
+      },
+    ],
+    source: 'https://science.nasa.gov/3d-resources/pillars-of-creation/',
+  },
+  {
+    id: 'cats-eye-nebula',
+    name: "Cat's Eye Nebula",
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Planetary nebula / NGC 6543',
+    ra: 269.63918316137 / 15,
+    dec: 66.632986315,
+    distance: 1000,
+    radius: 0.45,
+    color: '#86c4b8',
+    parent: 'milky-way',
+    identifier: 'NGC 6543',
+    morphology: 'shell',
+    description:
+      'Concentric shells and complex inner gas trace the mass loss of a dying star. It is a planetary nebula, not a supernova remnant. Its nested shells are reconstructed in 3D with illustrative spectral colors and approximate extent.',
+    source: 'https://science.nasa.gov/mission/hubble/science/',
+  },
+  {
+    id: 'butterfly-nebula',
+    name: 'Butterfly Nebula',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Bipolar planetary nebula / NGC 6302',
+    ra: 258.4354 / 15,
+    dec: -37.1031,
+    distance: 1040,
+    radius: 0.5,
+    color: '#dfae88',
+    parent: 'milky-way',
+    identifier: 'NGC 6302',
+    morphology: 'bipolar',
+    description:
+      'Two lobes of expanding gas emerge around a dense equatorial dust region. Its central remnant is an exceptionally hot star. The 3D lobes and enhanced emission colors are an illustrative reconstruction rather than a solid model or a supernova explosion.',
+    source: 'https://science.nasa.gov/mission/hubble/science/',
+  },
+  {
+    id: 'bubble-nebula',
+    name: 'Bubble Nebula',
+    kind: 'nebula',
+    scene: 'nebula',
+    type: 'Stellar-wind bubble / NGC 7635',
+    ra: 350.20125 / 15,
+    dec: 61.2016666667,
+    distance: 2200,
+    radius: 1.1,
+    color: '#a0bdcf',
+    parent: 'milky-way',
+    identifier: 'NGC 7635',
+    morphology: 'shell',
+    description:
+      'The wind of a massive star sweeps surrounding gas into a glowing bubble. The uneven shell expands into a denser molecular cloud. It is a wind-driven nebula, not the remains of an exploded star; depth and emission are illustrative.',
+    source: 'https://science.nasa.gov/mission/hubble/science/',
+  },
+  {
+    id: 'tycho-remnant',
+    name: 'Tycho Supernova Remnant',
+    kind: 'supernova',
+    scene: 'supernova',
+    type: 'Type Ia supernova remnant / SN 1572',
+    ra: 6.3395833333 / 15,
+    dec: 64.1408333333,
+    distance: 3000,
+    radius: 3.5,
+    color: '#d79e77',
+    parent: 'milky-way',
+    identifier: 'SNR G120.1+01.4',
+    morphology: 'shell',
+    description:
+      'An expanding shock and clumpy ejecta mark the Type Ia supernova observed in 1572. Blue-white shock rims and warm interior knots here are enhanced multiwavelength-inspired colors. The shell is an illustrative reconstruction, not a live explosion.',
+    source: 'https://science.nasa.gov/mission/chandra/',
+  },
+  {
+    id: 'kepler-remnant',
+    name: 'Kepler Supernova Remnant',
+    kind: 'supernova',
+    scene: 'supernova',
+    type: 'Type Ia supernova remnant / SN 1604',
+    ra: 262.66879 / 15,
+    dec: -21.48732,
+    distance: 5000,
+    radius: 3,
+    color: '#d4a2b3',
+    parent: 'milky-way',
+    identifier: 'SNR G004.5+06.8',
+    morphology: 'shell',
+    description:
+      'The remnant of the supernova seen in 1604 contains shocked gas and material expelled before the explosion. Its lopsided filaments reflect an uneven environment. The map uses an approximate reference distance and a reconstructed shell with illustrative X-ray-inspired color.',
+    source: 'https://science.nasa.gov/mission/chandra/',
+  },
+  {
+    id: 'sn1006',
+    name: 'SN 1006 Remnant',
+    kind: 'supernova',
+    scene: 'supernova',
+    type: 'Bilateral supernova remnant / SN 1006',
+    ra: 225.5920833333 / 15,
+    dec: -42.0969444444,
+    distance: 2200,
+    radius: 9.5,
+    color: '#8fb9e3',
+    parent: 'milky-way',
+    identifier: 'SNR G327.6+14.6',
+    morphology: 'shell',
+    description:
+      'Two prominent shock limbs surround the remains of the bright supernova recorded in 1006. Energetic particles radiate at the shocks. Its bilateral shell and emission filaments are a 3D reconstruction with enhanced colors, not a visible-light photograph.',
+    source: 'https://science.nasa.gov/mission/chandra/',
+  },
+  {
+    id: 'vela-remnant',
+    name: 'Vela Supernova Remnant',
+    kind: 'supernova',
+    scene: 'supernova',
+    type: 'Filamentary supernova remnant',
+    ra: 128.5 / 15,
+    dec: -45.8333333333,
+    distance: 287,
+    radius: 20,
+    color: '#cf998f',
+    parent: 'milky-way',
+    identifier: 'SNR G263.9-03.3',
+    morphology: 'filaments',
+    description:
+      'A nearby network of shock-heated filaments surrounds the aftermath of a massive star that exploded roughly 11,000 years ago. Its diffuse, broken shell spans a large area of the sky. The modeled knots and strands are illustrative, with approximate depth.',
+    source: 'https://science.nasa.gov/mission/chandra/',
+  },
+  {
+    id: 'bootes-void',
+    name: 'Bootes Void',
+    kind: 'void',
+    scene: 'void',
+    type: 'Cosmic supervoid / Great Void / Great Nothing',
+    ra: 14 + 50 / 60,
+    dec: 46,
+    distance: 215000000,
+    radius: 50000000,
+    color: '#a5c0cc',
+    parent: 'universe',
+    description:
+      'A vast region with far fewer galaxies than average, roughly 700 million light-years away in the direction of Bootes. It is not completely empty, not a black hole, and has no solid boundary. The approximate 330-million-light-year extent depends on how the void is defined. Sparse interior galaxies and surrounding filaments are schematic, not an identified survey of its members.',
+    facts: [
+      { label: 'Approximate diameter', value: '~330 million light-years' },
+      { label: 'Nature', value: 'Galaxy underdensity; not empty space' },
+      {
+        label: 'Geometry',
+        value: 'Schematic boundary and galaxy distribution',
+      },
+    ],
+    orbit: noOrbit(
+      'An underdense region in the expanding cosmic web has no single orbital period, central attractor, or physical surface. Its rounded reference volume is traversable and illustrative.',
+      'Cosmic web',
+    ),
+    source:
+      'https://science.nasa.gov/universe/galaxies/large-scale-structures/',
+  },
   {
     id: 'pleiades',
     name: 'Pleiades',
@@ -1566,6 +2139,15 @@ catalog.push(
     distance: `~${(item.distance * 3.26156).toLocaleString('en-US', { maximumSignificantDigits: 3 })} light-years`,
     color: item.color,
     parent: item.parent,
+    radiusKm:
+      item.radiusKm ??
+      (item.blackHole ? 2.95325 * item.blackHole.massSolar : undefined),
+    blackHole: item.blackHole,
+    morphology: item.morphology,
+    model: item.model,
+    coordinateSource: item.identifier
+      ? `https://simbad.cds.unistra.fr/simbad/sim-id?Ident=${encodeURIComponent(item.identifier)}`
+      : undefined,
     skyPosition: {
       rightAscensionHours: item.ra,
       declinationDegrees: item.dec,
@@ -1573,28 +2155,50 @@ catalog.push(
       radiusPc: item.radius,
     },
     facts: [
+      ...(item.facts ?? []),
       {
         label: 'Distance',
         value: `~${item.distance.toLocaleString('en-US')} pc`,
       },
       {
-        label: 'Approximate span',
-        value: `${(item.radius * 2 * 3.26156).toLocaleString('en-US', { maximumSignificantDigits: 3 })} ly`,
+        label: item.blackHole
+          ? 'Schwarzschild radius'
+          : item.radiusKm
+            ? 'Illustrative radius'
+            : 'Approximate span',
+        value:
+          item.blackHole || item.radiusKm
+            ? `~${(item.radiusKm ?? item.blackHole!.massSolar * 2.95325).toLocaleString('en-US', { maximumSignificantDigits: 3 })} km`
+            : `${(item.radius * 2 * 3.26156).toLocaleString('en-US', { maximumSignificantDigits: 3 })} ly`,
       },
-      { label: 'Right ascension', value: `${item.ra} h` },
-      { label: 'Declination', value: `${item.dec} deg` },
+      { label: 'Right ascension', value: `${item.ra.toFixed(4)} h` },
+      { label: 'Declination', value: `${item.dec.toFixed(4)} deg` },
     ],
-    orbit: noOrbit(
-      'The map uses an approximate reference distance and J2000 direction. Internal stars and gas have individual motions; no single precise orbit applies to this extended object. Shape and depth are illustrative.',
-      item.parent === 'milky-way'
-        ? 'Milky Way'
-        : 'Local gravitational environment',
-    ),
+    orbit:
+      item.orbit ??
+      noOrbit(
+        'The map uses an approximate reference distance and J2000 direction. Internal stars and gas have individual motions; no single precise orbit applies to this extended object. Shape and depth are illustrative.',
+        item.parent === 'milky-way'
+          ? 'Milky Way'
+          : 'Local gravitational environment',
+      ),
     source: item.source,
   })),
 )
 objectReference('m87-black-hole', 'messier-87')
 objectReference('sn1987a', 'large-magellanic-cloud')
+
+for (const object of catalog.filter((item) => item.blackHole)) {
+  const parent = catalog.find((item) => item.id === object.parent)
+  if (parent?.skyPosition && parent.kind === 'galaxy')
+    object.skyPosition = {
+      ...parent.skyPosition,
+      radiusPc: object.skyPosition!.radiusPc,
+    }
+  object.orbit = galacticOrbit(parent?.name ?? 'Milky Way')
+  object.orbit.note =
+    'The mapped coordinate is a reference position for the black-hole system or galactic center. The Schwarzschild radius is inferred from its approximate mass; spin, binary motion and accretion-flow dimensions are illustrative. No complete orbital solution is supplied.'
+}
 
 function objectReference(id: string, parent: string) {
   const object = catalog.find((item) => item.id === id)
@@ -1641,8 +2245,12 @@ export function searchCatalog(
     .replace(/tsar/g, 'quasar')
   const curated = catalog.filter((object) => {
     const nearby =
-      Boolean(object.body || object.jovianMoon) ||
-      ['moon', 'solar-system'].includes(object.id)
+      Boolean(
+        object.body ||
+        object.jovianMoon ||
+        object.saturnianMoon ||
+        object.trajectory,
+      ) || ['moon', 'solar-system'].includes(object.id)
     if (scope === 'nearby' && !nearby) return false
     if (scope === 'deep' && nearby) return false
     return `${object.name} ${object.classification} ${object.kind.replaceAll('-', ' ')} ${object.location}`

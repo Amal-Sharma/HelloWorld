@@ -1,9 +1,10 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
-import { PerspectiveCamera, Vector2, Vector3 } from 'three'
+import { Group, PerspectiveCamera, Vector2, Vector3 } from 'three'
 import { ContinuousMap } from '../components/ContinuousMap'
 import {
   extendedData,
+  elementsFromRow,
   loadExtendedCatalog,
   searchExtendedCatalog,
   starId,
@@ -26,6 +27,7 @@ import {
   MAX_DATE,
   MIN_DATE,
   sampleOrbit,
+  sampleSmallBodyOrbit,
   secondsIntoDay,
 } from './astronomy'
 
@@ -36,11 +38,288 @@ import {
   relativePosition,
   renderUnitPc,
   solarPositionPc,
+  skyPositionPc,
+  formatWorldDistance,
+  KM_PER_PARSEC,
+  LIGHT_SPEED_KM_S,
+  measurePositions,
+  formatLightTime,
+  formatRulerDistance,
 } from './mapCoordinates'
 
 const date = new Date('2026-09-16T12:00:00Z')
 
+import { parseViewpoint, readSharedViewpoint, viewpointUrl } from './viewpoints'
+import {
+  comparisonLayout,
+  physicalRadius,
+  scientificConfidence,
+} from './scienceTools'
+import {
+  defaultObserver,
+  earthShadow,
+  horizontalDirection,
+  observerBody,
+  upcomingEvents,
+  validObserver,
+} from './observer'
+import { Body } from 'astronomy-engine'
+import { missions } from '../data/missions'
+
+describe('shareable viewpoints', () => {
+  it('computes observer directions and known eclipse and transit events', () => {
+    expect(horizontalDirection(0, 0)).toEqual([0, 0, -1])
+    expect(horizontalDirection(90, 0)[0]).toBeCloseTo(1)
+    expect(validObserver({ ...defaultObserver, latitude: 91 })).toBe(false)
+    const noon = observerBody(
+      Body.Sun,
+      new Date('2026-03-20T12:00:00Z'),
+      defaultObserver,
+    )
+    expect(noon.altitude).toBeGreaterThan(35)
+    expect(noon.altitude).toBeLessThan(42)
+    expect(
+      observerBody(Body.Sun, new Date('2026-03-20T00:00:00Z'), defaultObserver)
+        .altitude,
+    ).toBeLessThan(0)
+    const site = {
+      ...defaultObserver,
+      latitude: 32.7767,
+      longitude: -96.797,
+      elevation: 131,
+    }
+    const solar = upcomingEvents(new Date('2024-04-01T00:00:00Z'), site).find(
+      (event) => event.kind === 'solar',
+    )!
+    expect(new Date(solar.peak).toISOString().slice(0, 10)).toBe('2024-04-08')
+    expect(solar.label).toBe('total solar eclipse')
+    expect(solar.obscuration).toBe(1)
+    const transit = upcomingEvents(
+      new Date('2019-11-01T00:00:00Z'),
+      defaultObserver,
+    ).find((event) => event.body === Body.Mercury)!
+    expect(new Date(transit.peak).toISOString().slice(0, 10)).toBe('2019-11-11')
+    const lunarSite = { ...defaultObserver, latitude: 34.0522, longitude: -118.2437 }
+    const lunar = upcomingEvents(new Date('2022-11-01T00:00:00Z'), lunarSite).find((event) => event.kind === 'lunar')!
+    expect(new Date(lunar.peak).toISOString().slice(0, 10)).toBe('2022-11-08')
+    const shadow = earthShadow(new Date(lunar.peak), lunarSite)!
+    const moon = observerBody(Body.Moon, new Date(lunar.peak), lunarSite)
+    const offset = Math.acos(Math.min(1, shadow.direction.reduce((sum, value, index) => sum + value * moon.direction[index], 0)))
+    expect(offset).toBeLessThan(shadow.umbraRadians)
+    expect(shadow.penumbraRadians).toBeGreaterThan(shadow.umbraRadians)
+  })
+  it('keeps physical radius ratios and labels uncertain science honestly', () => {
+    const objects = ['earth', 'jupiter', 'sun'].map((id) => objectById.get(id)!)
+    const layout = comparisonLayout(objects)
+    expect(layout[1].radius / layout[0].radius).toBeCloseTo(
+      objects[1].radiusKm! / objects[0].radiusKm!,
+      10,
+    )
+    expect(layout[2].radius).toBe(2)
+    expect(physicalRadius(objectById.get('gaia-bh1')!)).toBeCloseTo(
+      9.62 * 2.95325,
+    )
+    expect(
+      scientificConfidence(objectById.get('wise-0855')!).classification,
+    ).toBe('Candidate / uncertain')
+    expect(physicalRadius(objectById.get('wise-0855')!)).toBeNull()
+  })
+  it('round-trips metric camera coordinates and rejects malformed links', () => {
+    const point = parseViewpoint({
+      version: 1,
+      name: 'Earth from above',
+      objectId: 'earth',
+      view: 'map',
+      timestamp: date.getTime(),
+      camera: {
+        position: [1e-6, 2e-7, -3e-7],
+        target: [1e-6, 0, 0],
+        up: [0, 1, 0],
+      },
+      layers: {
+        orbits: true,
+        labels: false,
+        compressed: false,
+        galacticDust: true,
+        galaxyStyle: 'reference',
+      },
+    })!
+    expect(point).not.toBeNull()
+    const url = new URL(viewpointUrl(point, 'https://example.com/HelloWorld/'))
+    expect(url.pathname).toBe('/HelloWorld/')
+    expect(readSharedViewpoint(url.hash)).toEqual(point)
+    expect(readSharedViewpoint('#view=%oops')).toBeNull()
+    expect(readSharedViewpoint(`#view=${'a'.repeat(13000)}`)).toBeNull()
+    expect(
+      parseViewpoint({
+        ...point,
+        camera: { ...point.camera, position: [Infinity, 0, 0] },
+      }),
+    ).toBeNull()
+    expect(
+      parseViewpoint({
+        ...point,
+        camera: { ...point.camera, position: point.camera.target },
+      }),
+    ).toBeNull()
+    expect(parseViewpoint({ ...point, timestamp: NaN })).toBeNull()
+    expect(parseViewpoint({ ...point, version: 9 })).toBeNull()
+  })
+})
+
 describe('continuous map coordinates', () => {
+  it('measures center distances and light time in the same metric frame', () => {
+    const earthPosition = solarPositionPc(earth, date)
+    const moon = objectById.get('moon')!
+    const moonPosition = solarPositionPc(moon, date)
+    const result = measurePositions(earthPosition, moonPosition)!
+    expect(result.distancePc * AU_PER_PARSEC).toBeCloseTo(
+      distanceAu(getPosition(moon, date)),
+      9,
+    )
+    expect(result.lightSeconds).toBeGreaterThan(1)
+    expect(result.lightSeconds).toBeLessThan(1.5)
+    expect(
+      measurePositions([0, 0, 0], [1 / AU_PER_PARSEC, 0, 0])!.lightSeconds,
+    ).toBeCloseTo(499.0047838, 4)
+    expect(measurePositions(earthPosition, earthPosition)).toEqual({
+      distancePc: 0,
+      lightSeconds: 0,
+    })
+    expect(measurePositions([NaN, 0, 0], [0, 0, 0])).toBeNull()
+    expect(LIGHT_SPEED_KM_S).toBe(299792.458)
+    expect(formatLightTime(0)).toBe('0 s')
+    expect(formatLightTime(499)).toBe('8.317 min')
+    expect(formatLightTime(31557600)).toBe('1 year')
+    expect(formatRulerDistance(1 / AU_PER_PARSEC)).toBe('1 AU')
+    expect(formatRulerDistance(384400 / KM_PER_PARSEC)).toBe('384,400 km')
+  })
+  it('uses current ephemerides and refuses missing ruler coordinates', () => {
+    const spacecraft = objectById.get('voyager-1')!
+    const map: ContinuousMap = Object.assign(
+      Object.create(ContinuousMap.prototype),
+      {
+        timestamp: date.getTime(),
+        index: new Map([
+          ['earth', { solar: earth }],
+          ['moon', { solar: objectById.get('moon')! }],
+          ['voyager-1', { solar: spacecraft }],
+          ['sun', { position: new Vector3() }],
+          ['solar-system', { position: new Vector3(), aggregate: true }],
+          [
+            'andromeda',
+            { position: new Vector3(778000, 0, 0), approximate: true },
+          ],
+          [
+            'messier-87',
+            { position: new Vector3(16800000, 0, 0), approximate: true },
+          ],
+        ]),
+      },
+    )
+    const first = map.measure('earth', 'moon')
+    expect(first.basis).toBe('calculated')
+    expect(first.unavailable).toBeNull()
+    map.setTime(Date.UTC(2026, 9, 1))
+    expect(map.measure('earth', 'moon').distancePc).not.toBe(first.distancePc)
+    expect(map.measure('earth', 'unknown').distancePc).toBeNull()
+    expect(map.measure('sun', 'solar-system').distancePc).toBeNull()
+    expect(map.measure('sun', 'andromeda').basis).toBe('catalog')
+    expect(map.measure('sun', 'messier-87').basis).toBe('cosmological')
+    map.setTime(Date.UTC(2035, 0, 1))
+    expect(map.measure('sun', 'voyager-1').distancePc).toBeNull()
+    expect(map.measure('sun', 'voyager-1').unavailable).toContain('Voyager 1')
+  })
+  it('builds all minor-body paths in bounded reusable batches and disposes old buffers', () => {
+    const root = new Group()
+    const orbitRoot = new Group()
+    root.add(orbitRoot)
+    const surface = { dataset: {} as Record<string, string> }
+    const options = { orbits: false }
+    const map: ContinuousMap = Object.assign(
+      Object.create(ContinuousMap.prototype),
+      {
+        root,
+        minorOrbitRoot: orbitRoot,
+        minorOrbitRevision: -1,
+        minorOrbitBatches: [],
+        selectedMinorOrbit: null,
+        paths: [],
+        revision: 1,
+        index: new Map(),
+        selected: 'solar-system',
+        options,
+        unit: 0.0001,
+        currentDistance: 0.001,
+        worldCamera: new Vector3(),
+        origin: new Vector3(),
+        projected: new Vector3(),
+        host: { querySelector: () => surface },
+        labels: [],
+        models: new Map(),
+      },
+    )
+    const update = Object.getOwnPropertyDescriptor(
+      ContinuousMap.prototype,
+      'updateMinorOrbits',
+    )!.value as (this: ContinuousMap) => void
+    update.call(map)
+    expect(orbitRoot.children).toHaveLength(0)
+    options.orbits = true
+    for (
+      let frame = 0;
+      frame < 300 && surface.dataset.minorOrbitState !== 'ready';
+      frame++
+    )
+      update.call(map)
+    expect(surface.dataset.minorOrbitState).toBe('ready')
+    const counts = JSON.parse(surface.dataset.solarOrbitCounts) as Record<
+      string,
+      number
+    >
+    expect(
+      Object.values(counts).reduce((sum, count) => sum + count, 0),
+    ).toBeGreaterThan(9000)
+    expect(orbitRoot.children).toHaveLength(3)
+    expect(surface.dataset.orbitDrawCalls).toBe('3')
+    const buffers = [...orbitRoot.children]
+    const disposed = vi.fn()
+    for (const line of buffers) {
+      const geometry = Object.getOwnPropertyDescriptor(line, 'geometry')!
+        .value as import('three').BufferGeometry
+      expect(
+        Array.from(geometry.getAttribute('position').array).every(
+          Number.isFinite,
+        ),
+      ).toBe(true)
+      geometry.addEventListener('dispose', disposed)
+    }
+    options.orbits = false
+    update.call(map)
+    expect(surface.dataset.orbitDrawCalls).toBe('0')
+    expect(orbitRoot.visible).toBe(false)
+    options.orbits = true
+    update.call(map)
+    expect(orbitRoot.children).toEqual(buffers)
+    const camera = Object.getOwnPropertyDescriptor(map, 'worldCamera')!
+      .value as Vector3
+    camera.set(10, 0, 0)
+    update.call(map)
+    expect(orbitRoot.visible).toBe(false)
+    expect(surface.dataset.orbitDrawCalls).toBe('0')
+    camera.set(0, 0, 0)
+    Object.assign(map, { revision: 2 })
+    update.call(map)
+    expect(disposed).toHaveBeenCalledTimes(3)
+    expect(orbitRoot.children).toHaveLength(3)
+    map.dispose()
+    expect(root.children).toHaveLength(0)
+  })
+  it('keeps spacecraft-sized distances readable in meters', () => {
+    expect(formatWorldDistance(0.045 / KM_PER_PARSEC)).toBe('45 m')
+    expect(formatWorldDistance(0)).toBe('0 m')
+    expect(formatWorldDistance(2 / KM_PER_PARSEC)).toBe('2 km')
+  })
   it('keeps a followed distant quasar separated from the camera at extreme zoom', () => {
     const position = new Vector3(-6.2e8, 5.4e9, -1.0e8)
     const quasar = { id: 'quasar', position, radius: 0.004, kind: 'quasar' }
@@ -189,6 +468,152 @@ beforeAll(async () => {
 })
 
 describe('astronomy model', () => {
+  it('places Titan and Enceladus around Saturn with their own mean motions', () => {
+    const saturn = solarPositionPc(objectById.get('saturn')!, date)
+    for (const id of ['titan', 'enceladus']) {
+      const moon = objectById.get(id)!
+      const local = getPosition(moon, date)
+      const world = solarPositionPc(moon, date)
+      expect(
+        Math.hypot(...world.map((value, index) => value - saturn[index])) *
+          AU_PER_PARSEC,
+      ).toBeCloseTo(distanceAu(local), 9)
+      const full = getPosition(
+        moon,
+        new Date(date.getTime() + moon.orbit.periodDays! * DAY_MS),
+      )
+      expect(
+        Math.hypot(...full.map((value, index) => value - local[index])),
+      ).toBeLessThan(1e-8)
+      expect(moon.texture).toMatch(/\/textures\/.*-nasa\./)
+      expect(getAncestry(id).at(-2)?.id).toBe('saturn')
+      expect(scientificConfidence(moon).position).toBe('Approximate orbit')
+    }
+  })
+  it('covers historical mission milestones and enhanced flyby samples', () => {
+    for (const mission of missions) {
+      const spacecraft = objectById.get(mission.id)!
+      for (const event of mission.events)
+        expect(
+          getPosition(spacecraft, new Date(event.date)).every(Number.isFinite),
+          `${mission.name} ${event.name}`,
+        ).toBe(true)
+      expect(spacecraft.trajectory![0][0]).toBeLessThan(Date.UTC(2010, 0, 1))
+      expect(
+        getPosition(spacecraft, new Date('2035-01-01')).every(Number.isNaN),
+      ).toBe(true)
+    }
+    const probe = objectById.get('new-horizons')!
+    expect(probe.model!.path).toBe('models/new-horizons.glb')
+    expect(
+      distanceAu(getPosition(probe, new Date('2015-07-14T11:49:00Z'))),
+    ).toBeGreaterThan(30)
+    expect(
+      distanceAu(getPosition(probe, new Date('2015-07-14T11:49:00Z'))),
+    ).toBeLessThan(34)
+  })
+  it('samples every usable catalog minor-body orbit without closing escape paths', () => {
+    const counts = { closed: 0, open: 0 }
+    for (const row of extendedData.minorBodies) {
+      const elements = elementsFromRow(row)
+      if (!elements) continue
+      const points = sampleSmallBodyOrbit(elements, 72)
+      expect(points.length, row[1]).toBe(73)
+      expect(
+        points.every((point) => point.every(Number.isFinite)),
+        row[1],
+      ).toBe(true)
+      const start = new Vector3(...points[0])
+      const end = new Vector3(...points[points.length - 1])
+      if (elements.eccentricity < 1) {
+        counts.closed++
+        expect(
+          start.distanceTo(end) / Math.max(1, start.length()),
+          row[1],
+        ).toBeLessThan(1e-12)
+      } else {
+        counts.open++
+        expect(start.distanceTo(end), row[1]).toBeGreaterThan(
+          elements.perihelionDistance,
+        )
+      }
+    }
+    expect(counts.closed + counts.open).toBeGreaterThan(9000)
+    expect(counts.open).toBeGreaterThan(0)
+    const elements = elementsFromRow(extendedData.minorBodies[0])!
+    for (const invalid of [
+      { ...elements, eccentricity: NaN },
+      { ...elements, eccentricity: -1 },
+      { ...elements, perihelionDistance: 0 },
+      { ...elements, inclination: Infinity },
+    ])
+      expect(sampleSmallBodyOrbit(invalid)).toEqual([])
+    expect(sampleSmallBodyOrbit(elements, 0)).toEqual([])
+    for (const eccentricity of [1, 1.001, 2]) {
+      const points = sampleSmallBodyOrbit(
+        { ...elements, eccentricity, perihelionDistance: 0.5 },
+        64,
+      )
+      expect(distanceAu(points[0])).toBeCloseTo(10000, 5)
+      expect(distanceAu(points[32])).toBeCloseTo(0.5, 12)
+      expect(points[0]).not.toEqual(points[64])
+    }
+  })
+  it('places both Voyagers from bounded NASA Horizons samples in the shared frame', () => {
+    for (const [id, minimum, maximum] of [
+      ['voyager-1', 170, 174],
+      ['voyager-2', 142, 146],
+    ] as const) {
+      const spacecraft = objectById.get(id)!
+      const samples = spacecraft.trajectory!
+      expect(samples.length).toBeGreaterThan(4900)
+      expect(
+        samples.every(
+          (sample) => sample.length === 4 && sample.every(Number.isFinite),
+        ),
+      ).toBe(true)
+      expect(
+        samples.every(
+          (sample, index) => !index || sample[0] > samples[index - 1][0],
+        ),
+      ).toBe(true)
+      const position = getPosition(spacecraft, date)
+      expect(distanceAu(position)).toBeGreaterThan(minimum)
+      expect(distanceAu(position)).toBeLessThan(maximum)
+      expect(
+        Math.hypot(...solarPositionPc(spacecraft, date)) * AU_PER_PARSEC,
+      ).toBeCloseTo(distanceAu(position), 9)
+      const before = samples[100]
+      const after = samples[101]
+      const midpoint = getPosition(
+        spacecraft,
+        new Date((before[0] + after[0]) / 2),
+      )
+      expect(midpoint[0]).toBeCloseTo((before[1] + after[1]) / 2, 9)
+      expect(midpoint[1]).toBeCloseTo((before[3] + after[3]) / 2, 9)
+      expect(midpoint[2]).toBeCloseTo(-(before[2] + after[2]) / 2, 9)
+      for (const timestamp of [samples[0][0], samples[samples.length - 1][0]])
+        expect(
+          getPosition(spacecraft, new Date(timestamp)).every(Number.isFinite),
+        ).toBe(true)
+      for (const timestamp of [
+        samples[0][0] - 1,
+        samples[samples.length - 1][0] + 1,
+        NaN,
+      ])
+        expect(
+          getPosition(spacecraft, new Date(timestamp)).every(Number.isNaN),
+        ).toBe(true)
+      const trail = sampleOrbit(spacecraft, date)
+      expect(trail).toHaveLength(samples.length)
+      expect(distanceAu(trail[trail.length - 1])).toBeGreaterThan(
+        distanceAu(trail[0]),
+      )
+      expect(trail[0]).not.toEqual(trail[trail.length - 1])
+      expect(spacecraft.orbit.semiMajorAxis).toBeUndefined()
+      expect(getAncestry(id).at(-2)?.id).toBe('solar-system')
+    }
+  })
   it('places all Galilean moons around Jupiter in the shared world frame', () => {
     const jupiter = objectById.get('jupiter')!
     const primary = solarPositionPc(jupiter, date)
@@ -220,6 +645,64 @@ describe('astronomy model', () => {
       expect(object.skyPosition!.distancePc).toBeGreaterThan(0)
       expect(object.skyPosition!.radiusPc).toBeGreaterThan(0)
     }
+  })
+  it('maps the expanded catalog with consistent host centers and honest object classes', () => {
+    for (const id of [
+      'pso-j318',
+      'wise-0855',
+      'gaia-bh1',
+      'gaia-bh3',
+      'v404-cygni',
+      'centaurus-a-black-hole',
+      'perseus-a-black-hole',
+      'pillars-of-creation',
+      'cats-eye-nebula',
+      'butterfly-nebula',
+      'bubble-nebula',
+      'tycho-remnant',
+      'kepler-remnant',
+      'sn1006',
+      'vela-remnant',
+      'bootes-void',
+    ]) {
+      const object = objectById.get(id)!
+      expect(object).toBeDefined()
+      const sky = object.skyPosition!
+      const world = skyPositionPc(
+        sky.rightAscensionHours,
+        sky.declinationDegrees,
+        sky.distancePc,
+      )
+      expect(world.every(Number.isFinite)).toBe(true)
+      expect(Math.hypot(...world)).toBeCloseTo(sky.distancePc, 6)
+      expect(objectById.has(object.parent!)).toBe(true)
+      expect(new URL(object.source).protocol).toBe('https:')
+      if (object.blackHole) {
+        expect(object.radiusKm).toBeCloseTo(
+          object.blackHole.massSolar * 2.95325,
+        )
+        const host = objectById.get(object.parent!)!
+        if (host.kind === 'galaxy' && host.skyPosition) {
+          expect(sky.rightAscensionHours).toBe(
+            host.skyPosition!.rightAscensionHours,
+          )
+          expect(sky.declinationDegrees).toBe(
+            host.skyPosition!.declinationDegrees,
+          )
+          expect(sky.distancePc).toBe(host.skyPosition!.distancePc)
+        }
+      }
+    }
+    expect(objectById.get('gaia-bh1')!.blackHole!.accreting).toBe(false)
+    for (const id of ['pso-j318', 'wise-0855', 'bootes-void']) {
+      expect(objectById.get(id)!.orbit.model).toBe('none')
+      expect(sampleOrbit(objectById.get(id)!, date)).toEqual([])
+    }
+    expect(getAncestry('pillars-of-creation').at(-2)?.id).toBe('eagle-nebula')
+    expect(
+      searchCatalog('Great Void').some((object) => object.id === 'bootes-void'),
+    ).toBe(true)
+    expect(searchCatalog('Voyager', 'nearby')).toHaveLength(2)
   })
   it('places Earth approximately one AU from the Sun', () => {
     expect(distanceAu(getPosition(earth, date))).toBeGreaterThan(0.98)

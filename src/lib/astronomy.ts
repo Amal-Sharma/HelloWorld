@@ -31,6 +31,30 @@ export function clampTime(timestamp: number): number {
 }
 
 export function getPosition(object: CelestialObject, date: Date): Position {
+  if (object.trajectory) {
+    const samples = object.trajectory
+    const timestamp = date.getTime()
+    if (
+      samples.length < 2 ||
+      !Number.isFinite(timestamp) ||
+      timestamp < samples[0][0] ||
+      timestamp > samples[samples.length - 1][0]
+    )
+      return [NaN, NaN, NaN]
+    let lower = 0
+    let upper = samples.length - 1
+    while (upper - lower > 1) {
+      const middle = Math.floor((lower + upper) / 2)
+      if (samples[middle][0] <= timestamp) lower = middle
+      else upper = middle
+    }
+    const before = samples[lower]
+    const after = samples[upper]
+    const fraction = (timestamp - before[0]) / (after[0] - before[0])
+    const interpolate = (component: 1 | 2 | 3) =>
+      before[component] + (after[component] - before[component]) * fraction
+    return [interpolate(1), interpolate(3), -interpolate(2)]
+  }
   if (object.elements) return smallBodyPosition(object.elements, date)
   if (object.jovianMoon) {
     if (jovianCache?.timestamp !== date.getTime())
@@ -68,20 +92,9 @@ export function sampleOrbit(
   date: Date,
   segments = 180,
 ): Position[] {
-  if (object.elements) {
-    const elements = object.elements
-    const extent =
-      elements.eccentricity < 1
-        ? Math.PI
-        : Math.acos(-1 / elements.eccentricity) - 0.16
-    return Array.from({ length: segments + 1 }, (_, index) => {
-      const anomaly = -extent + (index / segments) * extent * 2
-      const radius =
-        (elements.perihelionDistance * (1 + elements.eccentricity)) /
-        (1 + elements.eccentricity * Math.cos(anomaly))
-      return orientOrbit(elements, anomaly, radius)
-    })
-  }
+  if (object.trajectory)
+    return object.trajectory.map((sample) => [sample[1], sample[3], -sample[2]])
+  if (object.elements) return sampleSmallBodyOrbit(object.elements, segments)
   if (
     !object.orbit.periodDays ||
     (!object.body && !object.jovianMoon && object.id !== 'moon')
@@ -95,6 +108,60 @@ export function sampleOrbit(
       ),
     ),
   )
+}
+
+export function sampleSmallBodyOrbit(
+  elements: OrbitalElements,
+  segments = 180,
+): Position[] {
+  if (
+    !Number.isInteger(segments) ||
+    segments < 4 ||
+    segments > 4096 ||
+    ![
+      elements.eccentricity,
+      elements.perihelionDistance,
+      elements.inclination,
+      elements.ascendingNode,
+      elements.perihelionArgument,
+    ].every(Number.isFinite) ||
+    elements.eccentricity < 0 ||
+    elements.perihelionDistance <= 0
+  )
+    return []
+  const eccentricity = elements.eccentricity
+  const closed = eccentricity < 1
+  const maximumRadius = Math.max(10000, elements.perihelionDistance * 4)
+  const extent = closed
+    ? Math.PI
+    : Math.acos(
+        ((elements.perihelionDistance * (1 + eccentricity)) / maximumRadius -
+          1) /
+          eccentricity,
+      )
+  const points = Array.from({ length: segments + 1 }, (_, index) => {
+    const progress = (index / segments) * 2 - 1
+    if (closed) {
+      const eccentricAnomaly =
+        Math.PI * (eccentricity > 0.8 ? progress ** 3 : progress)
+      return orientOrbit(
+        elements,
+        trueAnomaly(eccentricAnomaly, eccentricity),
+        orbitalRadius(
+          eccentricAnomaly,
+          eccentricity,
+          elements.perihelionDistance / (1 - eccentricity),
+        ),
+      )
+    }
+    const anomaly =
+      Math.sign(progress) * (1 - (1 - Math.abs(progress)) ** 2) * extent
+    const radius =
+      (elements.perihelionDistance * (1 + eccentricity)) /
+      (1 + eccentricity * Math.cos(anomaly))
+    return orientOrbit(elements, anomaly, radius)
+  })
+  return points.every((point) => point.every(Number.isFinite)) ? points : []
 }
 
 export function formatDate(timestamp: number): string {
@@ -131,7 +198,10 @@ export function smallBodyPosition(
 ): Position {
   const julianDate = MakeTime(date).tt + 2451545
   if (elements.eccentricity < 1 && elements.semiMajorAxis > 0) {
-    const meanMotion = 0.01720209895 / Math.pow(elements.semiMajorAxis, 1.5)
+    const meanMotion =
+      elements.meanMotionDegreesPerDay !== undefined
+        ? (elements.meanMotionDegreesPerDay * Math.PI) / 180
+        : 0.01720209895 / Math.pow(elements.semiMajorAxis, 1.5)
     const anomaly = kepler3(
       elements.eccentricity,
       (elements.meanAnomaly * Math.PI) / 180 +

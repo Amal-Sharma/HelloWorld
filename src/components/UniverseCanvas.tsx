@@ -4,12 +4,24 @@ import type { CelestialObject } from '../data/catalog'
 import { SpaceScene } from './spaceScene'
 import type { SceneOptions, ViewMode } from './spaceScene'
 import type { MapTelemetry } from './ContinuousMap'
+import type { CameraPose, Viewpoint } from '../lib/viewpoints'
 
 export interface SceneCommand {
-  action: 'zoom-in' | 'zoom-out' | 'reset' | 'screenshot' | 'scale' | 'follow'
+  action:
+    | 'zoom-in'
+    | 'zoom-out'
+    | 'reset'
+    | 'screenshot'
+    | 'scale'
+    | 'follow'
+    | 'toggle-follow'
+    | 'frame-ruler'
+    | 'capture-view'
+    | 'restore-view'
   serial: number
   distancePc?: number
   bodyId?: string | null
+  viewpoint?: Viewpoint
 }
 
 interface Props {
@@ -22,6 +34,7 @@ interface Props {
   onNotice: (message: string) => void
   onMapPosition?: (position: MapTelemetry) => void
   onNavigate?: () => void
+  onCaptureView?: (pose: CameraPose) => void
 }
 
 export default function UniverseCanvas({
@@ -34,6 +47,7 @@ export default function UniverseCanvas({
   onNotice,
   onMapPosition,
   onNavigate,
+  onCaptureView,
 }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const labelHost = useRef<HTMLDivElement>(null)
@@ -45,6 +59,7 @@ export default function UniverseCanvas({
     onMapPosition?.(position),
   )
   const navigated = useEffectEvent(() => onNavigate?.())
+  const captured = useEffectEvent((pose: CameraPose) => onCaptureView?.(pose))
   const initialOptions = useRef(options)
 
   useEffect(() => {
@@ -105,10 +120,16 @@ export default function UniverseCanvas({
     if (command.action === 'zoom-in') scene.current.zoom(0.77)
     if (command.action === 'zoom-out') scene.current.zoom(1.3)
     if (command.action === 'reset') scene.current.reset()
+    if (command.action === 'frame-ruler') scene.current.frameRuler()
+    if (command.action === 'capture-view') captured(scene.current.capturePose())
+    if (command.action === 'restore-view' && command.viewpoint)
+      scene.current.restoreViewpoint(command.viewpoint)
     if (command.action === 'scale' && command.distancePc !== undefined)
       scene.current.setMapScale(command.distancePc)
     if (command.action === 'follow')
       scene.current.followBody(command.bodyId ?? null)
+    if (command.action === 'toggle-follow' && command.bodyId)
+      scene.current.toggleFollow(command.bodyId)
     if (command.action === 'screenshot') {
       try {
         scene.current.screenshot()

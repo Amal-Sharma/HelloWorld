@@ -1,0 +1,42 @@
+{
+  "titan": {
+    "elements": {
+      "semiMajorAxis": 0.008168193619112429,
+      "eccentricity": 0.02878066297622108,
+      "inclination": 27.70591443986275,
+      "ascendingNode": 169.0804711655677,
+      "perihelionArgument": 178.4682504655041,
+      "epoch": 2461299.5,
+      "meanAnomaly": 56.63900822193472,
+      "perihelionTime": 2461296.990965112,
+      "perihelionDistance": 0.007933107591436233,
+      "meanMotionDegreesPerDay": 22.57402178044853
+    },
+    "periodDays": 15.94753489215633,
+    "texture": "/textures/titan-nasa.png",
+    "query": "https://ssd.jpl.nasa.gov/api/horizons.api?format=json&COMMAND=%27606%27&CENTER=%27500%40699%27&EPHEM_TYPE=%27ELEMENTS%27&START_TIME=%272026-09-16%27&STOP_TIME=%272026-09-17%27&STEP_SIZE=%271d%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&CSV_FORMAT=%27YES%27",
+    "model": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/t/Titan_1_5150.glb",
+    "source": "https://science.nasa.gov/resource/titan-3d-model/",
+    "credit": "NASA VTAD; base-color map extracted from the published GLB and resized to at most 2048 x 1024"
+  },
+  "enceladus": {
+    "elements": {
+      "semiMajorAxis": 0.001593685435718403,
+      "eccentricity": 0.00545512844448313,
+      "inclination": 28.04360634822121,
+      "ascendingNode": 169.5274813399744,
+      "perihelionArgument": 171.7855609796474,
+      "epoch": 2461299.5,
+      "meanAnomaly": 308.4413212168895,
+      "perihelionTime": 2461299.696860716,
+      "perihelionDistance": 0.001584991676966457,
+      "meanMotionDegreesPerDay": 261.904354586739
+    },
+    "periodDays": 1.374547592261484,
+    "texture": "/textures/enceladus-nasa.png",
+    "query": "https://ssd.jpl.nasa.gov/api/horizons.api?format=json&COMMAND=%27602%27&CENTER=%27500%40699%27&EPHEM_TYPE=%27ELEMENTS%27&START_TIME=%272026-09-16%27&STOP_TIME=%272026-09-17%27&STEP_SIZE=%271d%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&CSV_FORMAT=%27YES%27",
+    "model": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/e/Enceladus_1_504.glb",
+    "source": "https://science.nasa.gov/resource/enceladus-3d-model/",
+    "credit": "NASA VTAD; base-color map extracted from the published GLB and resized to at most 2048 x 1024"
+  }
+}

@@ -139,7 +139,7 @@ async function fetchSnapshot(name: string): Promise<unknown> {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 20_000)
     try {
-      const response = await fetch(`/data/${name}.json`, {
+      const response = await fetch(`${import.meta.env.BASE_URL}data/${name}.json`, {
         signal: controller.signal,
       })
       if (!response.ok) throw new Error(`Catalog unavailable: ${name}`)

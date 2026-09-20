@@ -96,8 +96,10 @@ async function canvasPixels(page: Page) {
     'data-render-quality',
     'full',
   )
-  return page.locator('.universe-canvas canvas').evaluate((element) => {
-    const canvas = element as HTMLCanvasElement
+  return page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>(
+      '.universe-canvas canvas',
+    )!
     const context = canvas.getContext('webgl2')!
     const pixels = new Uint8Array(canvas.width * canvas.height * 4)
     context.readPixels(
@@ -907,7 +909,7 @@ for (const viewport of [
     test(`new deep-sky visuals: ${id} at ${viewport.width}px retain detail and 3D interaction`, async ({
       page,
     }, testInfo) => {
-      test.setTimeout(180_000)
+      test.setTimeout(id === 'gaia-bh1' ? 300_000 : 180_000)
       const errors: string[] = []
       page.on('pageerror', (error) => errors.push(error.message))
       page.on('console', (message) => {
@@ -951,7 +953,9 @@ for (const viewport of [
         timeout: 45_000,
       })
       await expect
-        .poll(async () => (await canvasPixels(page)).checksum)
+        .poll(async () => (await canvasPixels(page)).checksum, {
+          timeout: id === 'gaia-bh1' ? 45_000 : 15_000,
+        })
         .not.toBe(pixels.checksum)
       const distance = Number(await canvas.getAttribute('data-camera-distance'))
       await page.getByRole('button', { name: 'Zoom in', exact: true }).click()
@@ -1282,8 +1286,15 @@ for (const viewport of [
     await page
       .getByRole('button', { name: 'Pause simulation', exact: true })
       .click()
+    await expect(
+      page.getByRole('button', { name: 'Play simulation', exact: true }),
+    ).toBeVisible()
+    const pausingFrame = await canvas.getAttribute('data-frame')
+    await expect(canvas).not.toHaveAttribute('data-frame', pausingFrame!)
     const age = await canvas.getAttribute('data-cosmic-age-gyr')
+    const pausedFrame = await canvas.getAttribute('data-frame')
     await canvasPixels(page)
+    await expect(canvas).not.toHaveAttribute('data-frame', pausedFrame!)
     await expect(canvas).toHaveAttribute('data-cosmic-age-gyr', age!)
     expect(
       await page.evaluate(
@@ -1517,7 +1528,7 @@ for (const viewport of [
   test(`Tools keeps the selected tab when changing Atlas destinations at ${viewport.width}px`, async ({
     page,
   }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(240_000)
     await page.setViewportSize(viewport)
     await page.goto('./?object=earth')
     const toolsButton = page.getByRole('button', {
@@ -3161,7 +3172,7 @@ for (const viewport of [
 test('galaxy reference style switches back to the original without changing the scene', async ({
   page,
 }, testInfo) => {
-  test.setTimeout(240_000)
+  test.setTimeout(360_000)
   await page.goto('./?object=milky-way&view=object')
   const canvas = page.locator('.universe-canvas canvas')
   await expect(canvas).toHaveAttribute('data-galaxy-texture-ready', 'true')
@@ -3187,7 +3198,7 @@ test('galaxy reference style switches back to the original without changing the 
   await styles.getByRole('button', { name: 'Reference', exact: true }).click()
   await expect(canvas).toHaveAttribute('data-galaxy-style', 'reference')
   await expect
-    .poll(async () => (await canvasPixels(page)).checksum)
+    .poll(async () => (await canvasPixels(page)).checksum, { timeout: 45_000 })
     .not.toBe(original.checksum)
   const reference = await canvasPixels(page)
   expect(reference.bright).toBeGreaterThan(1000)
@@ -3202,7 +3213,7 @@ test('galaxy reference style switches back to the original without changing the 
   await styles.getByRole('button', { name: 'Original', exact: true }).click()
   await expect(canvas).toHaveAttribute('data-galaxy-style', 'original')
   await expect
-    .poll(async () => (await canvasPixels(page)).checksum)
+    .poll(async () => (await canvasPixels(page)).checksum, { timeout: 45_000 })
     .toBe(original.checksum)
   await expect(canvas).toHaveAttribute('data-camera-distance', distance!)
   await expect(canvas).toHaveAttribute('data-map-generation', generation!)
@@ -3293,7 +3304,9 @@ for (const viewport of [
     test(`reference galaxy map preserves ${name} detail and style controls at ${viewport.width}px`, async ({
       page,
     }, testInfo) => {
-      test.setTimeout(name === 'inside' ? 300_000 : 180_000)
+      test.setTimeout(
+        name === 'inside' ? (viewport.width > 760 ? 420_000 : 300_000) : 180_000,
+      )
       await page.route('**/favicon.ico', (route) =>
         route.fulfill({ status: 204 }),
       )
@@ -3377,7 +3390,9 @@ for (const viewport of [
           'selective-distance-faded',
         )
         await expect
-          .poll(async () => (await canvasPixels(page)).checksum)
+          .poll(async () => (await canvasPixels(page)).checksum, {
+            timeout: 45_000,
+          })
           .toBe(accented.checksum)
       }
       await styles

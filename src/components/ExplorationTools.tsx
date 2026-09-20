@@ -3,11 +3,16 @@ import { useState } from 'react'
 import type { Viewpoint } from '../lib/viewpoints'
 import { catalog, objectById } from '../data/catalog'
 import { missions } from '../data/missions'
+import { atlasExperiences } from '../data/experiences'
 import { physicalRadius } from '../lib/scienceTools'
 import { observerPresets, upcomingEvents, validObserver } from '../lib/observer'
 import type { ObserverSite, SkyEvent } from '../lib/observer'
 
+export type ExplorationTab = 'views' | 'compare' | 'sky' | 'events' | 'missions' | 'atlas'
+
 interface Props {
+  tab: ExplorationTab
+  onTabChange: (tab: ExplorationTab) => void
   views: Viewpoint[]
   shareUrl: string
   onCapture: (name: string, share: boolean) => void
@@ -23,9 +28,12 @@ interface Props {
   activeEvent: SkyEvent | null
   onEventTime: (timestamp: number) => void
   onMission: (id: string, timestamp: number, overview: boolean) => void
+  onExplore: (id: string, view: 'map' | 'object' | 'orbit') => void
 }
 
 export default function ExplorationTools({
+  tab,
+  onTabChange,
   views,
   shareUrl,
   onCapture,
@@ -41,11 +49,9 @@ export default function ExplorationTools({
   activeEvent,
   onEventTime,
   onMission,
+  onExplore,
 }: Props) {
   const [name, setName] = useState('')
-  const [tab, setTab] = useState<
-    'views' | 'compare' | 'sky' | 'events' | 'missions'
-  >('views')
   const [missionId, setMissionId] = useState('voyager-1')
   const mission = missions.find((item) => item.id === missionId)!
   const trajectory = objectById.get(missionId)!.trajectory!
@@ -73,19 +79,28 @@ export default function ExplorationTools({
             ['sky', 'Sky'],
             ['events', 'Events'],
             ['missions', 'Missions'],
+            ['atlas', 'Atlas'],
           ] as const
         ).map(([id, title]) => (
           <button
             key={id}
             role="tab"
             aria-selected={tab === id}
-            onClick={() => setTab(id)}
+            onClick={() => onTabChange(id)}
           >
             {title}
           </button>
         ))}
       </div>
-      {tab === 'missions' ? (
+      {tab === 'atlas' ? (
+        <nav className="atlas-destinations" aria-label="Atlas destinations">
+          {atlasExperiences.map((item) => (
+            <button className="science-event" key={item.reference} onClick={() => onExplore(item.id, item.view)}>
+              <strong>{item.name}</strong><Focus size={15} />
+            </button>
+          ))}
+        </nav>
+      ) : tab === 'missions' ? (
         <>
           <h3>Mission timeline</h3>
           <label className="tool-field">

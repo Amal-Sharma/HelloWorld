@@ -45,6 +45,11 @@ import {
   measurePositions,
   formatLightTime,
   formatRulerDistance,
+  referencePositionPc,
+  LANIAKEA_RADIUS_PC,
+  OBSERVABLE_RADIUS_PC,
+  mapWheelZoomFactor,
+  overviewOpacity,
 } from './mapCoordinates'
 
 const date = new Date('2026-09-16T12:00:00Z')
@@ -65,6 +70,170 @@ import {
 } from './observer'
 import { Body } from 'astronomy-engine'
 import { missions } from '../data/missions'
+import { observationBands, spectralResponse, thermalResponse } from './spectrum'
+import { atlasExperiences } from '../data/experiences'
+import { expansionScale } from './cosmology'
+
+describe('atlas experience mappings', () => {
+  it('keeps Phobos and Deimos paths centered on Mars at their own mean motions', () => {
+    const mars = objectById.get('mars')!
+    expect(mars.members).toEqual(['phobos', 'deimos'])
+    for (const id of mars.members!) {
+      const moon = objectById.get(id)!
+      const local = getPosition(moon, date)
+      const separation = measurePositions(
+        solarPositionPc(mars, date),
+        solarPositionPc(moon, date),
+      )!
+      expect(separation.distancePc * AU_PER_PARSEC).toBeCloseTo(
+        distanceAu(local),
+        10,
+      )
+      expect(distanceAu(local) / moon.orbit.semiMajorAxis!).toBeGreaterThan(
+        0.98,
+      )
+      expect(distanceAu(local) / moon.orbit.semiMajorAxis!).toBeLessThan(1.02)
+      expect(sampleOrbit(moon, date)).toHaveLength(181)
+      expect(scientificConfidence(moon).position).toBe('Approximate orbit')
+    }
+  })
+  it('maps every listed reference experience to a catalog destination', () => {
+    expect(atlasExperiences).toHaveLength(15)
+    expect(new Set(atlasExperiences.map((item) => item.reference)).size).toBe(
+      15,
+    )
+    for (const item of atlasExperiences)
+      expect(objectById.has(item.id), item.name).toBe(true)
+  })
+  it('keeps Proxima orbital distances around the host and marks invented orientation and radii', () => {
+    const host = referencePositionPc(objectById.get('proxima')!)!
+    for (const id of [
+      'exo:Proxima Cen b',
+      'exo:Proxima Cen d',
+      'proxima-c',
+    ]) {
+      const planet = objectById.get(id)!
+      const local = getPosition(planet, date)
+      expect(distanceAu(local)).toBeCloseTo(planet.orbit.semiMajorAxis!, 8)
+      expect(
+        measurePositions(host, solarPositionPc(planet, date))!.distancePc *
+          AU_PER_PARSEC,
+      ).toBeCloseTo(planet.orbit.semiMajorAxis!, 7)
+      const later = getPosition(
+        planet,
+        new Date(date.getTime() + planet.orbit.periodDays! * DAY_MS),
+      )
+      expect(
+        new Vector3(...later).distanceTo(new Vector3(...local)),
+        'Period wrapping includes TT-versus-UTC drift',
+      ).toBeLessThan(planet.orbit.semiMajorAxis! * 1e-6)
+      expect(physicalRadius(planet)).toBeNull()
+    }
+    expect(objectById.get('proxima-c')!.classification).toMatch(/candidate/i)
+  })
+  it('normalizes the cosmological illustration and accelerates at late times', () => {
+    expect(expansionScale(13.8)).toBe(1)
+    expect(expansionScale(1)).toBeLessThan(expansionScale(5))
+    expect(expansionScale(25) - expansionScale(20)).toBeGreaterThan(
+      expansionScale(20) - expansionScale(15),
+    )
+    expect(expansionScale(NaN)).toBe(1)
+    expect(expansionScale(100)).toBe(expansionScale(30))
+  })
+})
+
+describe('illustrative wavelength models', () => {
+  it('distinguishes cool thermal bodies, hot remnants and energetic sources without inventing void emission', () => {
+    expect(thermalResponse(288, 10e-6)).toBeGreaterThan(
+      thermalResponse(288, 550e-9),
+    )
+    expect(thermalResponse(25000, 150e-9)).toBeGreaterThan(
+      thermalResponse(25000, 10e-6),
+    )
+    expect(thermalResponse(0, 1)).toBe(0)
+    expect(thermalResponse(5772, NaN)).toBe(0)
+    expect(spectralResponse(earth, 'infrared')).toBeGreaterThan(0.5)
+    expect(spectralResponse(earth, 'gamma')).toBe(0)
+    expect(spectralResponse(objectById.get('sirius-b')!, 'gamma')).toBe(0)
+    expect(
+      spectralResponse(objectById.get('crab-pulsar')!, 'gamma'),
+    ).toBeGreaterThan(0.5)
+    expect(spectralResponse(objectById.get('gaia-bh1')!, 'xray')).toBe(0)
+    for (const band of observationBands) {
+      expect(spectralResponse(objectById.get('bootes-void')!, band.id)).toBe(
+        0,
+      )
+      for (const object of catalog)
+        expect(
+          Number.isFinite(spectralResponse(object, band.id)),
+          `${object.id}:${band.id}`,
+        ).toBe(true)
+    }
+  })
+})
+
+describe('large-scale reference groups', () => {
+  it('places compact white dwarfs at catalog distances with physical reference radii', () => {
+    expect(
+      categories.some((category) => category.kind === 'white-dwarf'),
+    ).toBe(true)
+    for (const id of ['sirius-b', '40-eridani-b', 'van-maanen']) {
+      const dwarf = objectById.get(id)!
+      expect(dwarf.kind).toBe('white-dwarf')
+      expect(dwarf.radiusKm).toBeGreaterThan(4000)
+      expect(dwarf.radiusKm).toBeLessThan(15000)
+      expect(dwarf.skyPosition!.radiusPc * KM_PER_PARSEC).toBeCloseTo(
+        dwarf.radiusKm!,
+        5,
+      )
+      expect(Math.hypot(...referencePositionPc(dwarf)!)).toBeCloseTo(
+        dwarf.skyPosition!.distancePc,
+        8,
+      )
+      expect(physicalRadius(dwarf)).toBe(dwarf.radiusKm)
+      expect(sampleOrbit(dwarf, date)).toEqual([])
+    }
+    expect(searchCatalog('Sirius B')[0].id).toBe('sirius-b')
+  })
+  it('keeps the NGC 6769 triplet at catalog directions with unresolved shared depth', () => {
+    const group = objectById.get('ngc-6769-group')!
+    expect(group.members).toEqual(['ngc-6769', 'ngc-6770', 'ngc-6771'])
+    const center = new Vector3(...referencePositionPc(group)!)
+    const positions = group.members!.map((id) => {
+      const member = objectById.get(id)!
+      expect(member.parent).toBe(group.id)
+      expect(member.skyPosition!.distancePc).toBe(58000000)
+      expect(member.coordinateSource).toContain('simbad.cds.unistra.fr')
+      const position = new Vector3(...referencePositionPc(member)!)
+      expect(position.length()).toBeCloseTo(58000000, 5)
+      expect(
+        position.distanceTo(center) + member.skyPosition!.radiusPc,
+      ).toBeLessThan(group.skyPosition!.radiusPc)
+      return position
+    })
+    for (let index = 0; index < positions.length; index++) {
+      const separation = positions[index].distanceTo(
+        positions[(index + 1) % positions.length],
+      )
+      expect(separation).toBeGreaterThan(25000)
+      expect(separation).toBeLessThan(65000)
+    }
+    expect(searchCatalog('NGC 6769 Group')[0].id).toBe(group.id)
+  })
+
+  it('provides finite source-based reference groups for the Laniakea illustration', () => {
+    const basin = objectById.get('laniakea')!
+    for (const id of basin.members!) {
+      const position = referencePositionPc(objectById.get(id)!)!
+      expect(position.every(Number.isFinite), id).toBe(true)
+      expect(Math.hypot(...position), id).toBeLessThan(80000000)
+    }
+    expect(
+      referencePositionPc(objectById.get('norma-cluster')!)!,
+    ).toHaveLength(3)
+    expect(referencePositionPc(earth)).toBeNull()
+  })
+})
 
 describe('shareable viewpoints', () => {
   it('computes observer directions and known eclipse and transit events', () => {
@@ -148,6 +317,19 @@ describe('shareable viewpoints', () => {
     const url = new URL(viewpointUrl(point, 'https://example.com/HelloWorld/'))
     expect(url.pathname).toBe('/HelloWorld/')
     expect(readSharedViewpoint(url.hash)).toEqual(point)
+    expect(point.layers.radioExposure).toBe(3)
+    const radio = { ...point, layers: { ...point.layers, spectrum: 'radio' as const, radioExposure: 5 } }
+    expect(readSharedViewpoint(new URL(viewpointUrl(radio, url.href)).hash)).toEqual(radio)
+    for (const exposure of [0, 9, NaN, '3'])
+      expect(parseViewpoint({ ...point, layers: { ...point.layers, radioExposure: exposure } })).toBeNull()
+    const infrared = { ...point, layers: { ...point.layers, spectrum: 'infrared' }, model: { cosmicAgeGyr: 20, densityGain: 0.75, showCandidates: true } }
+    expect(readSharedViewpoint(new URL(viewpointUrl(infrared as typeof point, url.href)).hash)).toEqual(infrared)
+    expect(parseViewpoint({ ...point, layers: { ...point.layers, spectrum: 'unknown' } })).toBeNull()
+    expect(parseViewpoint({ ...infrared, model: { ...infrared.model, cosmicAgeGyr: 90 } })).toBeNull()
+    expect(point.layers.stellarGlints).toBe(true)
+    const withoutGlints = { ...point, layers: { ...point.layers, stellarGlints: false } }
+    expect(readSharedViewpoint(new URL(viewpointUrl(withoutGlints, url.href)).hash)).toEqual(withoutGlints)
+    expect(parseViewpoint({ ...point, layers: { ...point.layers, stellarGlints: 'true' } })).toBeNull()
     expect(readSharedViewpoint('#view=%oops')).toBeNull()
     expect(readSharedViewpoint(`#view=${'a'.repeat(13000)}`)).toBeNull()
     expect(
@@ -168,6 +350,18 @@ describe('shareable viewpoints', () => {
 })
 
 describe('continuous map coordinates', () => {
+  it('bounds wheel gestures and separates supercluster and horizon overview scales', () => {
+    expect(mapWheelZoomFactor(1e9)).toBeLessThan(1.4)
+    expect(mapWheelZoomFactor(-1e9)).toBeGreaterThan(0.7)
+    expect(mapWheelZoomFactor(100) * mapWheelZoomFactor(-100)).toBeCloseTo(1, 12)
+    expect(mapWheelZoomFactor(1, 1)).toBe(mapWheelZoomFactor(16))
+    expect(mapWheelZoomFactor(NaN)).toBe(1)
+    expect(overviewOpacity('laniakea', 1e6)).toBe(0)
+    expect(overviewOpacity('laniakea', LANIAKEA_RADIUS_PC)).toBe(1)
+    expect(overviewOpacity('universe', 80e6)).toBe(0)
+    expect(overviewOpacity('universe', OBSERVABLE_RADIUS_PC)).toBe(1)
+    expect(OBSERVABLE_RADIUS_PC / LANIAKEA_RADIUS_PC).toBeGreaterThan(175)
+  })
   it('measures center distances and light time in the same metric frame', () => {
     const earthPosition = solarPositionPc(earth, date)
     const moon = objectById.get('moon')!
@@ -796,6 +990,8 @@ describe('object catalog', () => {
       searchCatalog('', 'nearby').some((object) => object.kind === 'exoplanet'),
     ).toBe(false)
     expect(searchCatalog('Earth', 'deep')).toHaveLength(0)
+    expect(searchCatalog('Proxima').filter((object) => object.id === 'exo:Proxima Cen b')).toHaveLength(1)
+    expect(searchCatalog('Earth-Moon', 'nearby')[0].id).toBe('earth-moon')
     expect(searchCatalog('no-such-object')).toHaveLength(0)
   })
 })

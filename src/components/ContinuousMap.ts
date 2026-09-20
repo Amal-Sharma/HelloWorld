@@ -28,13 +28,19 @@ import {
   formatWorldDistance,
   KM_PER_PARSEC,
   OBSERVABLE_RADIUS_PC,
+  LANIAKEA_RADIUS_PC,
+  MAX_MAP_DISTANCE_PC,
+  overviewOpacity,
   renderUnitPc,
   skyPositionPc,
   solarPositionPc,
   measurePositions,
+  referencePositionPc,
 } from '../lib/mapCoordinates'
 import type { DistanceMeasurement } from '../lib/mapCoordinates'
 import type { CameraPose } from '../lib/viewpoints'
+import { observationBands, spectralResponse } from '../lib/spectrum'
+import type { ObservationBand } from '../lib/spectrum'
 
 export interface MapTelemetry {
   region: string
@@ -67,6 +73,9 @@ interface MapOptions {
   labels: boolean
   orbits: boolean
   highQuality: boolean
+  spectrum?: ObservationBand
+  radioExposure?: number
+  showCandidates?: boolean
   ruler?: readonly [string, string] | null
   catalogRevision?: number
 }
@@ -89,7 +98,6 @@ const locations: Record<string, [number, number, number, number]> = {
   andromeda: [0.712, 41.269, 778000, 23000],
   triangulum: [1.564, 30.66, 840000, 9200],
   whirlpool: [13.498, 47.195, 9500000, 11650],
-  virgo: [12.45, 12.72, 16500000, 2300000],
   'm87-black-hole': [12.514, 12.391, 16800000, 19e9 / KM_PER_PARSEC],
   '3c273': [12.485, 2.052, 650000000, 2.65e9 / KM_PER_PARSEC],
   ton618: [12.474, 31.478, 5500000000, 1.2e11 / KM_PER_PARSEC],
@@ -231,12 +239,12 @@ export class ContinuousMap {
     this.cloud = new THREE.Points(
       new THREE.BufferGeometry(),
       new THREE.ShaderMaterial({
-        uniforms: { uPixelRatio: { value: 1 } },
+        uniforms: { uPixelRatio: { value: 1 }, uBandColor: { value: new THREE.Color() }, uBandMix: { value: 0 } },
         vertexColors: true,
         transparent: true,
         depthWrite: false,
         depthTest: false,
-        vertexShader: `attribute float aSize; attribute float aAlpha; varying vec3 vColor; varying float vAlpha; uniform float uPixelRatio; void main() { vColor = color; vAlpha = aAlpha; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); gl_PointSize = aSize * uPixelRatio; }`,
+        vertexShader: `attribute float aSize, aAlpha, aBandGain; varying vec3 vColor; varying float vAlpha; uniform float uPixelRatio, uBandMix; uniform vec3 uBandColor; void main() { vColor = mix(color, uBandColor, uBandMix); vAlpha = aAlpha * aBandGain; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); gl_PointSize = aSize * uPixelRatio; }`,
         fragmentShader: `varying vec3 vColor; varying float vAlpha; void main() { float radius = length(gl_PointCoord - 0.5) * 2.0; if (radius > 1.0) discard; float intensity = exp(-radius * radius * 5.0); gl_FragColor = vec4(vColor, vAlpha * intensity * (1.0 - smoothstep(0.65, 1.0, radius)));\n #include <tonemapping_fragment>\n #include <colorspace_fragment>\n }`,
       }),
     )
@@ -305,6 +313,8 @@ export class ContinuousMap {
         object.id === 'moon' ||
         object.jovianMoon ||
         object.saturnianMoon ||
+        object.martianMoon ||
+        object.planetaryHost ||
         object.trajectory
       ) {
         const position = solarPositionPc(object, date)
@@ -324,6 +334,16 @@ export class ContinuousMap {
       } else if (object.id === 'sun') this.add(base)
       else if (object.id === 'solar-system')
         this.add({ ...base, radius: 38 / AU_PER_PARSEC, aggregate: true })
+      else if (object.id === 'earth-moon')
+        this.add({
+          ...base,
+          radius: 500000 / KM_PER_PARSEC,
+          aggregate: true,
+          position: new THREE.Vector3(
+            ...solarPositionPc(objectById.get('earth')!, date),
+          ),
+          solar: objectById.get('earth')!,
+        })
       else if (object.id === 'nearby-stars')
         this.add({ ...base, radius: 8, aggregate: true })
       else if (object.id === 'milky-way')
@@ -343,7 +363,7 @@ export class ContinuousMap {
       else if (object.id === 'local-group')
         this.add({
           ...base,
-          position: new THREE.Vector3(...skyPositionPc(0.712, 41.269, 390000)),
+          position: new THREE.Vector3(...referencePositionPc(object)!),
           radius: 1500000,
           aggregate: true,
           approximate: true,
@@ -351,11 +371,15 @@ export class ContinuousMap {
       else if (object.id === 'laniakea')
         this.add({
           ...base,
-          radius: 80000000,
+          radius: LANIAKEA_RADIUS_PC,
           aggregate: true,
           approximate: true,
         })
-      else if (object.id === 'universe')
+      else if (
+        object.id === 'universe' ||
+        object.visualization === 'dark-matter' ||
+        object.visualization === 'dark-energy'
+      )
         this.add({
           ...base,
           radius: OBSERVABLE_RADIUS_PC,
@@ -379,10 +403,12 @@ export class ContinuousMap {
             ),
           ),
           radius: radiusPc,
+          aggregate: object.kind === 'system',
           approximate: true,
         })
       } else if (locations[object.id]) {
-        const [ascension, declination, distance, radius] = locations[object.id]
+        const [ascension, declination, distance, radius] =
+          locations[object.id]
         this.add({
           ...base,
           position: new THREE.Vector3(
@@ -392,7 +418,9 @@ export class ContinuousMap {
           approximate: true,
         })
       } else {
-        const row = namedStars.get(object.name.toLowerCase().replace(/ a$/, ''))
+        const row = namedStars.get(
+          object.name.toLowerCase().replace(/ a$/, ''),
+        )
         if (row && row[3] !== null && row[4] !== null && row[5] !== null)
           this.add({
             ...base,
@@ -467,7 +495,7 @@ export class ContinuousMap {
           ? 5
           : entry.aggregate || entry.kind === 'void'
             ? 0
-            : entry.kind === 'star'
+            : entry.kind === 'star' || entry.kind === 'white-dwarf'
               ? Math.max(1, 4.8 - (entry.magnitude ?? 1) * 0.36)
               : entry.elements
                 ? 1.8
@@ -475,7 +503,10 @@ export class ContinuousMap {
                   ? 2.1
                   : 5
     })
-    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+    geometry.setAttribute(
+      'color',
+      new THREE.Float32BufferAttribute(colors, 3),
+    )
     geometry.setAttribute('aSize', new THREE.Float32BufferAttribute(sizes, 1))
     geometry.setAttribute(
       'aAlpha',
@@ -486,16 +517,46 @@ export class ContinuousMap {
     )
     this.cloud.geometry.dispose()
     this.cloud.geometry = geometry
+    this.updateSpectrum()
+  }
+
+  private updateSpectrum() {
+    const band = this.options.spectrum ?? 'visible'
+    const exposure =
+      band === 'radio'
+        ? Math.max(1, Math.min(8, this.options.radioExposure ?? 3))
+        : 1
+    const curated = new Map(catalog.map((object) => [object.id, object]))
+    this.cloud.geometry.setAttribute(
+      'aBandGain',
+      new THREE.Float32BufferAttribute(
+        this.entries.map(
+          (entry) =>
+            spectralResponse(curated.get(entry.id) ?? entry, band) * exposure,
+        ),
+        1,
+      ),
+    )
+    const material = this.cloud.material as THREE.ShaderMaterial
+    material.uniforms.uBandMix.value = band === 'visible' ? 0 : 1
+    material.uniforms.uBandColor.value.set(
+      observationBands.find((item) => item.id === band)!.color,
+    )
   }
 
   private createPaths() {
     for (const object of [
       ...solarPlanets,
-      ...catalog.filter((item) => item.kind === 'moon' || item.trajectory),
+      ...catalog.filter(
+        (item) =>
+          item.kind === 'moon' || item.trajectory || item.planetaryHost,
+      ),
     ]) {
-      const positions = sampleOrbit(object, new Date(this.timestamp), 220).map(
-        (point) => new THREE.Vector3(...eclipticToWorld(point)),
-      )
+      const positions = sampleOrbit(
+        object,
+        new Date(this.timestamp),
+        220,
+      ).map((point) => new THREE.Vector3(...eclipticToWorld(point)))
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute(
         'position',
@@ -519,7 +580,9 @@ export class ContinuousMap {
         id: object.id,
         line,
         positions,
-        parentId: object.kind === 'moon' ? object.parent : undefined,
+        parentId:
+          object.planetaryHost ??
+          (object.kind === 'moon' ? object.parent : undefined),
       })
     }
   }
@@ -573,7 +636,11 @@ export class ContinuousMap {
                   : '#929b87',
             transparent: true,
             opacity:
-              kind === 'dwarf-planet' ? 0.42 : kind === 'comet' ? 0.006 : 0.01,
+              kind === 'dwarf-planet'
+                ? 0.42
+                : kind === 'comet'
+                  ? 0.006
+                  : 0.01,
             depthWrite: false,
           }),
         )
@@ -605,8 +672,8 @@ export class ContinuousMap {
         ) {
           const entry = batch.entries[batch.next++]
           processed++
-          const points = sampleSmallBodyOrbit(entry.elements, 64).map((point) =>
-            eclipticToWorld(point),
+          const points = sampleSmallBodyOrbit(entry.elements, 64).map(
+            (point) => eclipticToWorld(point),
           )
           if (points.length < 2) continue
           for (let index = 1; index < points.length; index++) {
@@ -683,10 +750,13 @@ export class ContinuousMap {
     const canvas = this.host.querySelector('canvas')!
     const counts: Partial<Record<ObjectKind, number>> = {}
     for (const path of this.paths) {
-      const kind = objectById.get(path.id)!.kind
+      const object = objectById.get(path.id)!
+      if (object.planetaryHost) continue
+      const kind = object.kind
       counts[kind] = (counts[kind] ?? 0) + 1
     }
-    for (const batch of this.minorOrbitBatches) counts[batch.kind] = batch.count
+    for (const batch of this.minorOrbitBatches)
+      counts[batch.kind] = batch.count
     canvas.dataset.solarOrbitCounts = JSON.stringify(counts)
     canvas.dataset.skippedOrbitCount = String(
       this.minorOrbitRevision === this.revision
@@ -700,7 +770,9 @@ export class ContinuousMap {
     )
     canvas.dataset.minorOrbitState =
       this.minorOrbitRevision < this.revision ||
-      this.minorOrbitBatches.some((batch) => batch.next < batch.entries.length)
+      this.minorOrbitBatches.some(
+        (batch) => batch.next < batch.entries.length,
+      )
         ? 'pending'
         : 'ready'
     canvas.dataset.orbitDrawCalls = String(
@@ -756,8 +828,12 @@ export class ContinuousMap {
   }
 
   setOptions(options: MapOptions) {
+    const spectrumChanged =
+      this.options.spectrum !== options.spectrum ||
+      this.options.radioExposure !== options.radioExposure
     this.options = options
     this.refreshCatalog()
+    if (spectrumChanged) this.updateSpectrum()
     if (options.catalogRevision && this.pendingFocus) {
       const pending = this.pendingFocus
       this.pendingFocus = null
@@ -993,16 +1069,22 @@ export class ContinuousMap {
     this.readCamera()
     const distance = Math.max(
       this.minimumCameraDistance(entry.position),
-      entry.radius *
-        (entry.kind === 'black-hole' || entry.kind === 'quasar'
-          ? 42
-          : entry.kind === 'galaxy'
-            ? 4.8
-            : entry.id === 'saturn'
-              ? 10
-              : 5),
+      Math.min(
+        MAX_MAP_DISTANCE_PC,
+        entry.radius *
+          (entry.kind === 'black-hole' || entry.kind === 'quasar'
+            ? 42
+            : entry.kind === 'galaxy'
+              ? 4.8
+              : entry.id === 'saturn'
+                ? 10
+                : 5),
+      ),
     )
-    const direction = this.worldCamera.clone().sub(this.worldTarget).normalize()
+    const direction = this.worldCamera
+      .clone()
+      .sub(this.worldTarget)
+      .normalize()
     if (direction.lengthSq() === 0) direction.set(0.1, 0.6, 1).normalize()
     const target = entry.position.clone()
     const camera = target.clone().addScaledVector(direction, distance)
@@ -1083,7 +1165,7 @@ export class ContinuousMap {
       THREE.MathUtils.clamp(
         distance * factor,
         minimum,
-        OBSERVABLE_RADIUS_PC * 2.5,
+        MAX_MAP_DISTANCE_PC,
       ) / Math.max(distance, 1e-30)
     camera.sub(anchor).multiplyScalar(clamped).add(anchor)
     target.sub(anchor).multiplyScalar(clamped).add(anchor)
@@ -1156,12 +1238,24 @@ export class ContinuousMap {
   private updateModels(now: number) {
     this.nearBlackHole = false
     for (const model of this.models.values()) model.root.visible = false
+    const priority =
+      this.zoomAnchor?.id ?? this.following?.id ?? this.selected
     const candidates = this.visibleEntries
-      .sort((first, second) => second.angular - first.angular)
+      .sort(
+        (first, second) =>
+          Number(second.entry.id === priority) -
+            Number(first.entry.id === priority) ||
+          second.angular - first.angular,
+      )
       .slice(0, 18)
     for (const { entry, distance } of candidates) {
-      if (entry.aggregate && entry.kind !== 'universe') continue
-      if (entry.kind === 'exoplanet') continue
+      if (
+        entry.aggregate &&
+        entry.kind !== 'universe' &&
+        entry.id !== 'laniakea'
+      )
+        continue
+      if (entry.kind === 'exoplanet' && !entry.solar?.planetaryHost) continue
       let model = this.models.get(entry.id)
       if (!model) {
         const object = objectById.get(entry.id)
@@ -1183,6 +1277,26 @@ export class ContinuousMap {
         .multiplyScalar(projection)
         .add(this.camera.position)
       model.root.scale.setScalar(model.unit * projection)
+      if (entry.id === 'laniakea' || entry.id === 'universe') {
+        const fade = overviewOpacity(entry.id, distance)
+        model.root.traverse((node) => {
+          const target = (node as THREE.Mesh).material
+          if (!target) return
+          for (const material of Array.isArray(target) ? target : [target]) {
+            const uniform = (material as THREE.ShaderMaterial).uniforms
+              ?.uOpacity
+            material.userData.overviewBaseOpacity ??=
+              uniform?.value ?? material.opacity
+            if (uniform)
+              uniform.value = material.userData.overviewBaseOpacity * fade
+            else
+              material.opacity = material.userData.overviewBaseOpacity * fade
+          }
+        })
+        this.host.querySelector('canvas')!.dataset[
+          entry.id === 'laniakea' ? 'laniakeaOpacity' : 'universeOpacity'
+        ] = fade.toFixed(4)
+      }
       if (entry.kind === 'galaxy') {
         model.root.traverse((node) => {
           if (
@@ -1336,7 +1450,9 @@ export class ContinuousMap {
           Math.abs(this.flight.target.x),
           Math.abs(this.flight.target.y),
           Math.abs(this.flight.target.z),
-        ) * Number.EPSILON * 16,
+        ) *
+          Number.EPSILON *
+          16,
       )
       if (
         this.worldCamera.distanceTo(this.flight.camera) < tolerance &&
@@ -1374,6 +1490,16 @@ export class ContinuousMap {
       this.host.clientHeight /
       (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)))
     this.entries.forEach((entry, index) => {
+      const conceptual =
+        this.selected === 'dark-matter' || this.selected === 'dark-energy'
+      if (
+        ((entry.id === 'dark-matter' || entry.id === 'dark-energy') &&
+          entry.id !== this.selected) ||
+        (conceptual && entry.id === 'universe')
+      ) {
+        alphas[index] = 0
+        return
+      }
       if (
         entry.elements &&
         (updateMinor || this.models.get(entry.id)?.root.visible)
@@ -1383,7 +1509,12 @@ export class ContinuousMap {
         if (entry.positionValid)
           entry.position.fromArray(eclipticToWorld(physical))
       }
-      if (entry.positionValid === false) {
+      if (
+        entry.positionValid === false ||
+        (entry.id === 'proxima-c' &&
+          !this.options.showCandidates &&
+          this.selected !== entry.id)
+      ) {
         alphas[index] = 0
         return
       }
@@ -1411,36 +1542,51 @@ export class ContinuousMap {
       const stellarVisibility =
         Math.min(1, 200 / Math.max(200, this.currentDistance)) ** 1.8
       alphas[index] =
-        entry.id === 'solar-system'
-          ? this.currentDistance > 0.01
-            ? 0.9
-            : 0
-          : entry.kind === 'star' || entry.kind === 'exoplanet'
-            ? stellarVisibility *
-              (entry.kind === 'exoplanet'
-                ? 0.6
-                : entry.magnitude !== undefined
-                  ? 0.34
-                  : 0.95)
-            : entry.elements || entry.solar
-              ? Math.min(1, 0.002 / Math.max(0.002, this.currentDistance))
-              : 0.9
+        entry.kind === 'void'
+          ? 0
+          : entry.id === 'solar-system'
+            ? this.currentDistance > 0.01
+              ? 0.9
+              : 0
+            : entry.kind === 'star' ||
+                entry.kind === 'white-dwarf' ||
+                entry.kind === 'exoplanet'
+              ? stellarVisibility *
+                (entry.kind === 'exoplanet'
+                  ? 0.6
+                  : entry.magnitude !== undefined
+                    ? 0.34
+                    : 0.95)
+              : entry.elements || entry.solar
+                ? Math.min(1, 0.002 / Math.max(0.002, this.currentDistance))
+                : 0.9
       if (
         angular * focalLength > 5 &&
         !entry.aggregate &&
-        entry.kind !== 'exoplanet'
+        (entry.kind !== 'exoplanet' || entry.solar?.planetaryHost)
       )
         alphas[index] = 0
       if (
         angular * focalLength > 1.5 &&
-        (!entry.aggregate || (entry.kind === 'universe' && distance > 1e7))
+        overviewOpacity(entry.id, physicalDistance) > 0 &&
+        (!entry.aggregate ||
+          (entry.kind === 'universe' && distance > 1e7) ||
+          entry.id === 'laniakea')
       )
-        this.visibleEntries.push({ entry, distance: physicalDistance, angular })
+        this.visibleEntries.push({
+          entry,
+          distance: physicalDistance,
+          angular,
+        })
       if (
         labelFrame &&
-        (!entry.aggregate || entry.id === 'solar-system') &&
-        alphas[index] > 0.05 &&
-        (entry.kind !== 'star' ||
+        (!entry.aggregate ||
+          entry.id === 'solar-system' ||
+          (entry.id === 'laniakea' &&
+            overviewOpacity(entry.id, physicalDistance) > 0.05) ||
+          (entry.id === 'local-group' && this.selected === 'laniakea')) &&
+        (alphas[index] > 0.05 || entry.kind === 'void') &&
+        ((entry.kind !== 'star' && entry.kind !== 'white-dwarf') ||
           (entry.magnitude ?? 0) < 1.5 ||
           physicalDistance < distance * 4) &&
         (entry.kind !== 'exoplanet' || physicalDistance < distance * 5) &&
@@ -1467,10 +1613,17 @@ export class ContinuousMap {
     this.updateModels(now)
     this.updateRuler()
     for (const path of this.paths) {
+      const host = objectById.get(path.id)?.planetaryHost
       path.line.visible =
         this.options.orbits &&
         this.unit < 0.02 &&
-        this.unit > (path.parentId ? 1e-11 : 1e-9)
+        this.unit > (path.parentId ? 1e-11 : 1e-9) &&
+        (path.id !== 'proxima-c' ||
+          Boolean(this.options.showCandidates) ||
+          this.selected === path.id) &&
+        (!host ||
+          this.worldCamera.distanceTo(this.index.get(host)!.position) <
+            Math.max(this.currentDistance * 4, 100 / AU_PER_PARSEC))
       if (!path.line.visible) continue
       const buffer = path.line.geometry.attributes
         .position as THREE.BufferAttribute
@@ -1508,6 +1661,12 @@ export class ContinuousMap {
       .filter((model) => model.root.visible)
       .map((model) => model.entry.id)
       .join(',')
+    canvas.dataset.hostOrbitIds = this.paths
+      .filter(
+        (path) => path.line.visible && objectById.get(path.id)?.planetaryHost,
+      )
+      .map((path) => path.id)
+      .join(',')
     canvas.dataset.worldTarget = this.worldTarget.toArray().join(',')
     canvas.dataset.followingId = this.followLocked
       ? (this.following?.id ?? '')
@@ -1523,7 +1682,13 @@ export class ContinuousMap {
               ? 'Milky Way'
               : span < 5e6
                 ? 'Local Group'
-                : 'Cosmic Web'
+                : span < 2e7
+                  ? 'Galaxy Groups & Clusters'
+                  : span < LANIAKEA_RADIUS_PC * 8
+                    ? 'Supercluster Neighborhood'
+                    : span < OBSERVABLE_RADIUS_PC * 0.5
+                      ? 'Cosmic Web'
+                      : 'Observable Universe'
       const isFocused = (entry: Entry) =>
         this.currentDistance < entry.radius * 110 &&
         this.worldTarget.distanceTo(entry.position) <

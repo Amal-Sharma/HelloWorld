@@ -18,9 +18,11 @@ export interface SceneCommand {
     | 'frame-ruler'
     | 'capture-view'
     | 'restore-view'
+    | 'surface-region'
   serial: number
   distancePc?: number
   bodyId?: string | null
+  regionId?: string
   viewpoint?: Viewpoint
 }
 
@@ -124,6 +126,8 @@ export default function UniverseCanvas({
     if (command.action === 'capture-view') captured(scene.current.capturePose())
     if (command.action === 'restore-view' && command.viewpoint)
       scene.current.restoreViewpoint(command.viewpoint)
+    if (command.action === 'surface-region' && command.regionId)
+      scene.current.focusMarsRegion(command.regionId)
     if (command.action === 'scale' && command.distancePc !== undefined)
       scene.current.setMapScale(command.distancePc)
     if (command.action === 'follow')

@@ -35,7 +35,7 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
       - name: Build and verify the deployed site
-        run: npm run test:e2e -- --grep 'deployment assets|NASA Voyager|new deep-sky visuals|saved and shared viewpoints|science tools show|mission histories and detailed|lunar eclipse and Mercury'
+        run: npm run test:e2e -- --grep 'deployment assets|NASA Voyager|new deep-sky visuals|saved and shared viewpoints|science tools show|mission histories and detailed|lunar eclipse and Mercury|cosmic structures|galaxy reference style|named galaxy groups|TON 618 keeps|reference galaxy map preserves inside|void emits|white dwarfs render|spectrum modes|atlas planetary|cosmology diagrams|Mars regions|Tools keeps|unselected Laniakea|Laniakea filaments|radio exposure lifts'
       - name: Upload production output
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
         with:

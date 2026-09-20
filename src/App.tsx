@@ -64,7 +64,13 @@ import { defaultObserver } from './lib/observer'
 import type { ObserverSite, SkyEvent } from './lib/observer'
 import type { SceneCommand } from './components/UniverseCanvas'
 import type { GalaxyStyle, ViewMode } from './components/spaceScene'
+import { observationBands, spectralSummary } from './lib/spectrum'
+import type { ObservationBand } from './lib/spectrum'
+import { expansionScale } from './lib/cosmology'
+import { marsRegions } from './data/marsRegions'
 import type { MapTelemetry } from './components/ContinuousMap'
+import type { ExplorationTab } from './components/ExplorationTools'
+import { MAX_MAP_DISTANCE_PC } from './lib/mapCoordinates'
 import {
   catalog,
   categories,
@@ -102,6 +108,7 @@ const kindIcons: Record<ObjectKind, typeof Globe2> = {
   asteroid: Circle,
   moon: Circle,
   star: Star,
+  'white-dwarf': CircleDot,
   'black-hole': CircleDot,
   nebula: Sparkles,
   supernova: Zap,
@@ -392,8 +399,16 @@ function App() {
   const [highQuality, setHighQuality] = useState(true)
   const [adaptiveQuality, setAdaptiveQuality] = useState(true)
   const [galacticDust, setGalacticDust] = useState(true)
+  const [stellarGlints, setStellarGlints] = useState(true)
+  const [spectrum, setSpectrum] = useState<ObservationBand>('visible')
+  const [radioExposure, setRadioExposure] = useState(3)
+  const [showCandidates, setShowCandidates] = useState(false)
+  const [cosmicAgeGyr, setCosmicAgeGyr] = useState(13.8)
+  const [densityGain, setDensityGain] = useState(1)
+  const [marsRegion, setMarsRegion] = useState('')
   const [rulerOpen, setRulerOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
+  const [toolTab, setToolTab] = useState<ExplorationTab>('views')
   const [comparison, setComparison] = useState(['earth', 'jupiter', 'sun'])
   const [observer, setObserver] = useState<ObserverSite>(defaultObserver)
   const [skyFocus, setSkyFocus] = useState<'Sun' | 'Moon' | null>(null)
@@ -458,7 +473,7 @@ function App() {
   const matches = searchCatalog(query, scope, resultLimit)
   const extendedMatches = searchExtendedCatalog(query, scope, resultLimit)
   const totalDestinations =
-    catalog.length +
+    catalog.filter((item) => !hasExtendedObject(item.id)).length +
     (catalogMetadata
       ? catalogMetadata.stars +
         catalogMetadata.exoplanets +
@@ -481,8 +496,8 @@ function App() {
     .filter((item): item is CelestialObject => {
       if (!item) return false
       const local =
-        Boolean(item.body || item.elements || item.trajectory) ||
-        ['moon', 'solar-system'].includes(item.id)
+        Boolean(item.body || (item.elements && !item.planetaryHost) || item.trajectory) ||
+        ['moon', 'solar-system', 'earth-moon'].includes(item.id)
       return (
         (scope === 'all' || (scope === 'nearby' ? local : !local)) &&
         `${item.name} ${item.classification}`
@@ -494,6 +509,7 @@ function App() {
     (Boolean(object.trajectory) && !canShowOrbit) ||
     (hasExtendedObject(object.id) &&
       !object.galacticPosition &&
+      !object.skyPosition &&
       ['star', 'exoplanet'].includes(object.kind))
   const mapFocus = mapPosition?.focusedId
     ? objectById.get(mapPosition.focusedId)
@@ -519,6 +535,7 @@ function App() {
     cancelStartupNavigation()
     const nextView = view === 'orbit' ? 'map' : view
     setSelectedId(id)
+    setMarsRegion('')
     setView(nextView)
     setInspectorTab('overview')
     setShowSidebar(false)
@@ -563,8 +580,11 @@ function App() {
       comparison: view === 'compare' ? comparison : undefined,
       observer: view === 'sky' ? observer : undefined,
       skyFocus: view === 'sky' ? skyFocus : undefined,
+      model: { cosmicAgeGyr, densityGain, showCandidates },
       camera: pose,
-      layers: { orbits, labels, compressed, galacticDust, galaxyStyle },
+      layers: {
+        orbits, labels, compressed, galacticDust, galaxyStyle, stellarGlints, spectrum, radioExposure,
+      },
     }
     if (captureRequest.current.share)
       setShareUrl(viewpointUrl(point, window.location.href))
@@ -603,6 +623,12 @@ function App() {
     setLabels(point.layers.labels)
     setCompressed(point.layers.compressed)
     setGalacticDust(point.layers.galacticDust)
+    setStellarGlints(point.layers.stellarGlints ?? true)
+    setSpectrum(point.layers.spectrum ?? 'visible')
+    setRadioExposure(point.layers.radioExposure ?? 3)
+    setCosmicAgeGyr(point.model?.cosmicAgeGyr ?? 13.8)
+    setDensityGain(point.model?.densityGain ?? 1)
+    setShowCandidates(point.model?.showCandidates ?? false)
     setGalaxyStyle(point.layers.galaxyStyle)
     setCommand((current) => ({
       action: 'restore-view',
@@ -617,7 +643,6 @@ function App() {
   }
   function observe(site: ObserverSite, event?: SkyEvent) {
     cancelStartupNavigation()
-    setToolsOpen(false)
     setObserver(site)
     setActiveEvent(event ?? null)
     setSkyFocus(event ? (event.kind === 'lunar' ? 'Moon' : 'Sun') : null)
@@ -642,7 +667,6 @@ function App() {
     setView(overview ? 'orbit' : 'map')
     setSkyFocus(null)
     updateLocation(id, overview ? 'orbit' : 'map')
-    if (overview) setToolsOpen(false)
   }
 
   function sendCommand(action: SceneCommand['action'], distancePc?: number) {
@@ -783,6 +807,14 @@ function App() {
     setResultLimit(24)
   }, [query, scope])
 
+  const advanceCosmology = useEffectEvent((elapsed: number) => {
+    if (selectedId !== 'dark-energy') return false
+    const next = Math.min(30, cosmicAgeGyr + elapsed * 0.4)
+    setCosmicAgeGyr(next)
+    if (next === 30) setPlaying(false)
+    return true
+  })
+
   useEffect(() => {
     let last = performance.now()
     if (!playing) return
@@ -791,6 +823,7 @@ function App() {
       const elapsed = Math.min((now - last) / 1000, 0.2)
       last = now
       if (document.hidden) return
+      if (advanceCosmology(elapsed)) return
       const next = clampTime(simulationRef.current + elapsed * speed * DAY_MS)
       if (next === simulationRef.current) setPlaying(false)
       simulationRef.current = next
@@ -867,6 +900,12 @@ function App() {
             rulerOpen && view === 'map' && !uiHidden ? rulerEndpoints : null,
           galaxyStyle,
           galacticDust,
+          stellarGlints,
+          spectrum: destination.visualization?.startsWith('dark-') ? 'visible' : spectrum,
+          radioExposure,
+          showCandidates,
+          cosmicAgeGyr,
+          densityGain,
           inspectorOpen: showInspector && view !== 'sky' && view !== 'compare',
           catalogRevision: catalogMetadata ? 1 : 0,
           navigation,
@@ -888,6 +927,8 @@ function App() {
           }
         >
           <ExplorationTools
+            tab={toolTab}
+            onTabChange={setToolTab}
             views={viewpoints}
             shareUrl={shareUrl}
             onNotice={notify}
@@ -898,7 +939,6 @@ function App() {
               setComparison(ids)
               if (show) {
                 setInspectionView('compare')
-                setToolsOpen(false)
               }
             }}
             observer={observer}
@@ -906,11 +946,15 @@ function App() {
             onObserve={observe}
             activeEvent={activeEvent}
             onMission={visitMission}
+            onExplore={(id, nextView) => {
+              selectObject(id)
+              setView(nextView)
+              updateLocation(id, nextView)
+            }}
             onEventTime={(time) => {
               if (activeEvent) observe(activeEvent.site, activeEvent)
               setDate(time)
               setPlaying(false)
-              setToolsOpen(false)
               setCommand((current) => ({
                 action: 'reset',
                 serial: (current?.serial ?? 0) + 1,
@@ -958,9 +1002,10 @@ function App() {
           <button
             title="Exploration tools"
             aria-label="Exploration tools"
+            aria-pressed={toolsOpen}
             className={toolsOpen ? 'selected' : ''}
             onClick={() => {
-              setToolsOpen((current) => !current)
+              setToolsOpen(true)
               setRulerOpen(false)
               setShowSidebar(false)
               setSettingsOpen(false)
@@ -970,10 +1015,11 @@ function App() {
             <span>Tools</span>
           </button>
           <button
-            className={activeTab === 'explore' ? 'selected' : ''}
+            className={!toolsOpen && activeTab === 'explore' ? 'selected' : ''}
             aria-label="Explore"
             title="Explore"
             onClick={() => {
+              setToolsOpen(false)
               setActiveTab('explore')
               setTourIndex(null)
             }}
@@ -982,10 +1028,11 @@ function App() {
             <span>Explore</span>
           </button>
           <button
-            className={activeTab === 'saved' ? 'selected' : ''}
+            className={!toolsOpen && activeTab === 'saved' ? 'selected' : ''}
             aria-label="Saved destinations"
             title="Saved destinations"
             onClick={() => {
+              setToolsOpen(false)
               setActiveTab('saved')
               setQuery('')
               setScope('all')
@@ -997,10 +1044,11 @@ function App() {
             <span className="nav-count">{bookmarks.length}</span>
           </button>
           <button
-            className={activeTab === 'journey' ? 'selected' : ''}
+            className={!toolsOpen && activeTab === 'journey' ? 'selected' : ''}
             aria-label="Journey"
             title="Journey"
             onClick={() => {
+              setToolsOpen(false)
               setActiveTab('journey')
               stepTour(0)
             }}
@@ -1292,6 +1340,66 @@ function App() {
             <span /> LIVE RENDER
           </span>
         </div>
+        <div className="spectrum-controls">
+          <label>
+            Spectrum
+            <select
+              aria-label="Observation spectrum"
+              value={view === 'sky' || view === 'compare' || object.visualization?.startsWith('dark-') ? 'visible' : spectrum}
+              disabled={view === 'sky' || view === 'compare' || object.visualization?.startsWith('dark-')}
+              onChange={(event) => setSpectrum(event.target.value as ObservationBand)}
+            >
+              {observationBands.map((band) => <option key={band.id} value={band.id}>{band.label}</option>)}
+            </select>
+          </label>
+          {spectrum !== 'visible' && view !== 'sky' && view !== 'compare' && !object.visualization?.startsWith('dark-') && (
+            <span role="status">False color / {spectralSummary(object, spectrum)}</span>
+          )}
+        </div>
+        {spectrum === 'radio' && view !== 'sky' && view !== 'compare' && !object.visualization?.startsWith('dark-') && (
+          <label className="model-control">
+            Radio exposure
+            <input type="range" aria-label="Radio exposure" min="1" max="8" step="0.25" value={radioExposure} onChange={(event) => setRadioExposure(Number(event.target.value))} />
+            <output>{radioExposure.toFixed(2)}x</output>
+          </label>
+        )}
+        {object.visualization === 'dark-matter' && (
+          <label className="model-control">
+            Relative density contrast
+            <input aria-label="Density contrast" type="range" min="0.25" max="2" step="0.05" value={densityGain} onChange={(event) => setDensityGain(Number(event.target.value))} />
+            <output>{densityGain.toFixed(2)}</output>
+          </label>
+        )}
+        {object.visualization === 'dark-energy' && (
+          <label className="model-control">
+            Cosmic age
+            <input aria-label="Cosmic age in billion years" type="range" min="1" max="30" step="0.05" value={cosmicAgeGyr} onChange={(event) => { setPlaying(false); setCosmicAgeGyr(Number(event.target.value)) }} />
+            <output>{cosmicAgeGyr.toFixed(1)} Gyr / a={expansionScale(cosmicAgeGyr).toFixed(2)}</output>
+          </label>
+        )}
+        {object.visualization?.startsWith('dark-') && <span className="model-basis">Conceptual model / not emitted light or a measured survey</span>}
+        {(object.visualization === 'proxima-system' || object.planetaryHost) && (
+          <label className="model-control">
+            <input type="checkbox" checked={showCandidates} onChange={(event) => setShowCandidates(event.target.checked)} />
+            Include candidate Proxima c
+          </label>
+        )}
+        {object.id === 'mars' && view === 'object' && (
+          <div className="spectrum-controls">
+            <label>
+              Surface region
+              <select aria-label="Mars surface region" value={marsRegion} onChange={(event) => {
+                setMarsRegion(event.target.value)
+                setPlaying(false)
+                setCommand((current) => ({ action: 'surface-region', regionId: event.target.value, serial: (current?.serial ?? 0) + 1 }))
+              }}>
+                <option value="" disabled>Choose region</option>
+                {marsRegions.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}
+              </select>
+            </label>
+            {marsRegion && <a href={`https://planetarynames.wr.usgs.gov/Feature/${marsRegions.find((region) => region.id === marsRegion)!.feature}`} target="_blank" rel="noreferrer" aria-label="USGS region coordinates" title="USGS region coordinates"><ExternalLink size={14} /></a>}
+          </div>
+        )}
         {view === 'map' && (
           <div className="continuous-scale" aria-label="Live map scale">
             <span>{mapPosition?.region ?? 'Solar System'}</span>
@@ -1299,7 +1407,7 @@ function App() {
               type="range"
               aria-label="Map scale"
               min="-12"
-              max="10.2"
+              max={Math.log10(MAX_MAP_DISTANCE_PC)}
               step="0.025"
               value={Math.log10(
                 Math.max(mapPosition?.distancePc ?? 0.0009, 1e-12),
@@ -1311,7 +1419,6 @@ function App() {
             <output>{mapPosition?.span ?? '190 AU'}</output>
           </div>
         )}
-      </section>
       <div className="scene-heading" key={sceneTitle}>
         <span className="eyebrow">
           <span className="tiny-cross">+</span>
@@ -1339,6 +1446,7 @@ function App() {
                   : object.subtitle}
         </p>
       </div>
+      </section>
       <div className="scene-coordinate">
         <span>{view === 'map' ? 'GALACTIC XYZ / PC' : 'FOCUS LOCKED'}</span>
         <div>
@@ -1520,6 +1628,15 @@ function App() {
               </label>
               <div className="setting-label">Milky Way style</div>
               <label>
+                <span>Stellar glints</span>
+                <input
+                  type="checkbox"
+                  checked={stellarGlints && galaxyStyle === 'reference'}
+                  disabled={galaxyStyle !== 'reference'}
+                  onChange={(event) => setStellarGlints(event.target.checked)}
+                />
+              </label>
+              <label>
                 <span>Galactic dust</span>
                 <input
                   type="checkbox"
@@ -1677,6 +1794,26 @@ function App() {
                 <ArrowUpRight size={12} />
               </button>
             </div>
+            {object.members && (
+              <nav
+                className="structure-members"
+                aria-label={
+                  object.id === 'laniakea' ? 'Reference groups' : object.kind === 'system' || object.kind === 'planet' ? 'System members' : 'Group members'
+                }
+              >
+                <div className="section-label">
+                  {object.id === 'laniakea'
+                    ? 'REFERENCE GROUPS'
+                    : object.kind === 'system' || object.kind === 'planet' ? 'SYSTEM MEMBERS' : 'MEMBER GALAXIES'}
+                </div>
+                {object.members.map((id) => (
+                  <button key={id} onClick={() => selectObject(id)}>
+                    <span>{objectById.get(id)?.name ?? id}</span>
+                    <ArrowUpRight size={14} />
+                  </button>
+                ))}
+              </nav>
+            )}
             {inspectorTab === 'overview' ? (
               <>
                 <p className="object-description">{object.description}</p>

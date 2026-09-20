@@ -15,7 +15,33 @@ export const AU_PER_PARSEC = 206264.80624709636
 export const KM_PER_PARSEC = 3.085677581491367e13
 export const LIGHT_YEARS_PER_PARSEC = 3.261563777
 export const OBSERVABLE_RADIUS_PC = 14.26e9
+export const MAX_MAP_DISTANCE_PC = OBSERVABLE_RADIUS_PC * 2.5
+export const LANIAKEA_RADIUS_PC = 80e6
 export const LIGHT_SPEED_KM_S = 299792.458
+
+export function mapWheelZoomFactor(deltaY: number, deltaMode = 0) {
+  if (!Number.isFinite(deltaY)) return 1
+  const units = deltaMode === 1 ? 16 : deltaMode === 2 ? 300 : 1
+  return Math.exp(Math.max(-0.32, Math.min(0.32, deltaY * units * 0.0016)))
+}
+
+export function overviewOpacity(id: string, distancePc: number) {
+  const radius =
+    id === 'laniakea'
+      ? LANIAKEA_RADIUS_PC
+      : id === 'universe'
+        ? OBSERVABLE_RADIUS_PC
+        : 0
+  if (!radius) return 1
+  const progress = Math.max(
+    0,
+    Math.min(
+      1,
+      Math.log(Math.max(distancePc, 1) / (radius * 0.025)) / Math.log(8),
+    ),
+  )
+  return progress * progress * (3 - 2 * progress)
+}
 
 export interface DistanceMeasurement {
   fromId: string
@@ -80,18 +106,34 @@ export function catalogToWorld(positionPc: Position): Position {
   return [positionPc[0], positionPc[2], -positionPc[1]]
 }
 
-export function solarPositionPc(object: CelestialObject, date: Date): Position {
+export function solarPositionPc(
+  object: CelestialObject,
+  date: Date,
+): Position {
   const position = eclipticToWorld(getPosition(object, date))
-  if (object.id !== 'moon' && !object.jovianMoon && !object.saturnianMoon)
+  if (object.planetaryHost && object.skyPosition) {
+    const center = referencePositionPc(object)!
+    return position.map(
+      (coordinate, index) => coordinate + center[index],
+    ) as Position
+  }
+  if (
+    object.id !== 'moon' &&
+    !object.jovianMoon &&
+    !object.saturnianMoon &&
+    !object.martianMoon
+  )
     return position
   const primary = RotateVector(
     galacticRotation,
     HelioVector(
-      object.saturnianMoon
-        ? Body.Saturn
-        : object.jovianMoon
-          ? Body.Jupiter
-          : Body.Earth,
+      object.martianMoon
+        ? Body.Mars
+        : object.saturnianMoon
+          ? Body.Saturn
+          : object.jovianMoon
+            ? Body.Jupiter
+            : Body.Earth,
       date,
     ),
   )
@@ -127,6 +169,18 @@ export function renderUnitPc(distancePc: number): number {
       Math.min(10, Math.floor(Math.log10(Math.max(distancePc, 1e-14) / 8))),
     )
   )
+}
+
+export function referencePositionPc(object: CelestialObject): Position | null {
+  if (object.skyPosition) {
+    const { rightAscensionHours, declinationDegrees, distancePc } =
+      object.skyPosition
+    return skyPositionPc(rightAscensionHours, declinationDegrees, distancePc)
+  }
+  if (object.id === 'local-group') return skyPositionPc(0.712, 41.269, 390000)
+  if (object.id === 'milky-way') return [8200, 0, 0]
+  if (object.id === 'laniakea' || object.id === 'universe') return [0, 0, 0]
+  return null
 }
 
 export function relativePosition(

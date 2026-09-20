@@ -1,6 +1,8 @@
 import { MAX_DATE, MIN_DATE } from './astronomy'
 import { validObserver } from './observer'
 import type { ObserverSite } from './observer'
+import { isObservationBand } from './spectrum'
+import type { ObservationBand } from './spectrum'
 
 export interface CameraPose {
   position: [number, number, number]
@@ -17,6 +19,7 @@ export interface Viewpoint {
   comparison?: string[]
   observer?: ObserverSite
   skyFocus?: 'Sun' | 'Moon' | null
+  model?: { cosmicAgeGyr: number; densityGain: number; showCandidates: boolean }
   timestamp: number
   camera: CameraPose
   layers: {
@@ -24,6 +27,9 @@ export interface Viewpoint {
     labels: boolean
     compressed: boolean
     galacticDust: boolean
+    stellarGlints?: boolean
+    spectrum?: ObservationBand
+    radioExposure?: number
     galaxyStyle: 'original' | 'reference'
   }
 }
@@ -69,6 +75,15 @@ export function parseViewpoint(value: unknown): Viewpoint | null {
         typeof data.layers![key as keyof Viewpoint['layers']] === 'boolean',
     ) ||
     !['original', 'reference'].includes(data.layers.galaxyStyle) ||
+    (data.layers.stellarGlints !== undefined &&
+      typeof data.layers.stellarGlints !== 'boolean') ||
+    (data.layers.spectrum !== undefined && !isObservationBand(data.layers.spectrum)) ||
+    (data.layers.radioExposure !== undefined &&
+      (!Number.isFinite(data.layers.radioExposure) || data.layers.radioExposure < 1 || data.layers.radioExposure > 8)) ||
+    (data.model !== undefined && (!data.model ||
+      !Number.isFinite(data.model.cosmicAgeGyr) || data.model.cosmicAgeGyr < 1 || data.model.cosmicAgeGyr > 30 ||
+      !Number.isFinite(data.model.densityGain) || data.model.densityGain < 0.25 || data.model.densityGain > 2 ||
+      typeof data.model.showCandidates !== 'boolean')) ||
     (data.camera.fov !== undefined &&
       (!Number.isFinite(data.camera.fov) ||
         data.camera.fov < 0.1 ||
@@ -96,6 +111,7 @@ export function parseViewpoint(value: unknown): Viewpoint | null {
     objectId: data.objectId,
     view: data.view!,
     timestamp: data.timestamp,
+    ...(data.model ? { model: { ...data.model } } : {}),
     comparison: data.view === 'compare' ? [...data.comparison!] : undefined,
     observer: data.view === 'sky' ? { ...data.observer! } : undefined,
     skyFocus: data.view === 'sky' ? (data.skyFocus ?? null) : undefined,
@@ -110,6 +126,9 @@ export function parseViewpoint(value: unknown): Viewpoint | null {
       labels: data.layers.labels,
       compressed: data.layers.compressed,
       galacticDust: data.layers.galacticDust,
+      stellarGlints: data.layers.stellarGlints ?? true,
+      spectrum: data.layers.spectrum ?? 'visible',
+      radioExposure: data.layers.radioExposure ?? 3,
       galaxyStyle: data.layers.galaxyStyle,
     },
   }

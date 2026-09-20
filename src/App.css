@@ -733,6 +733,67 @@
   width: 4px;
   height: 4px;
 }
+.spectrum-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px 14px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font: 10px var(--mono);
+  color: #c1d0c9;
+  pointer-events: auto;
+}
+.spectrum-controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.spectrum-controls select {
+  min-height: 30px;
+  max-width: 150px;
+  color: #dce7e2;
+  background: #101715;
+  border: 1px solid #ffffff24;
+  border-radius: 4px;
+  font: inherit;
+  padding: 4px 8px;
+}
+.spectrum-controls span {
+  max-width: 290px;
+  font-size: 9px;
+  line-height: 1.4;
+}
+.model-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  min-height: 30px;
+  font: 10px var(--mono);
+  color: #b7c7be;
+  pointer-events: auto;
+}
+.model-control input[type='range'] {
+  width: 120px;
+  min-width: 60px;
+  flex: 0 1 120px;
+  accent-color: var(--accent);
+}
+.model-control output {
+  white-space: nowrap;
+  font-size: 9px;
+}
+.model-basis {
+  display: block;
+  font: 9px var(--mono);
+  line-height: 1.5;
+  color: #a7b8ad;
+  margin-top: 6px;
+}
+.atlas-destinations .science-event {
+  align-items: center;
+  min-height: 40px;
+}
 .scene-heading {
   position: absolute;
   left: calc(var(--sidebar-width) + 34px);
@@ -741,6 +802,13 @@
   z-index: 2;
   max-width: calc(100% - var(--sidebar-width) - 430px);
   animation: object-arrive 650ms ease both;
+}
+main .scene-top > .scene-heading {
+  position: relative;
+  left: auto;
+  top: auto;
+  max-width: 100%;
+  margin-top: 14px;
 }
 .eyebrow {
   display: flex;
@@ -894,6 +962,11 @@
 }
 .science-view .viewer-tools {
   right: 16px;
+}
+@media (min-width: 760px) {
+  .observatory.tools-open .viewer-tools {
+    right: 340px;
+  }
 }
 .exploration-tools {
   position: absolute;
@@ -1071,7 +1144,7 @@
     right: 56px;
     bottom: 145px;
     width: auto;
-    max-height: calc(100dvh - 300px);
+    max-height: min(42dvh, calc(100dvh - 465px));
   }
   .tools-open .scene-heading,
   .tools-open .view-layers {
@@ -1424,6 +1497,35 @@
   line-height: 1.85;
   color: #9aa69b;
   margin: 17px 0 20px;
+}
+.structure-members {
+  padding: 14px 0 8px;
+  border-bottom: 1px solid #ffffff12;
+}
+.structure-members .section-label {
+  margin-bottom: 7px;
+}
+.structure-members button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 0;
+  color: #becfc3;
+  text-align: left;
+  font-size: 11px;
+}
+.structure-members button:hover {
+  color: var(--accent);
+}
+.structure-members button span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.structure-members button svg {
+  flex-shrink: 0;
 }
 .object-facts {
   display: grid;

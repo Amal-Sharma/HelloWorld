@@ -4,6 +4,12 @@ import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js'
 import { ContinuousMap } from './ContinuousMap'
 import type { CameraPose, Viewpoint } from '../lib/viewpoints'
 import { comparisonLayout } from '../lib/scienceTools'
+import { referencePositionPc } from '../lib/mapCoordinates'
+import { SpectralAppearance } from './spectralAppearance'
+import type { ObservationBand } from '../lib/spectrum'
+import { AU_PER_PARSEC, KM_PER_PARSEC, LANIAKEA_RADIUS_PC, mapWheelZoomFactor } from '../lib/mapCoordinates'
+import { expansionScale } from '../lib/cosmology'
+import { marsRegions } from '../data/marsRegions'
 import { Body } from 'astronomy-engine'
 import {
   defaultObserver,
@@ -51,6 +57,12 @@ export interface SceneOptions {
   uiHidden?: boolean
   galaxyStyle?: GalaxyStyle
   galacticDust?: boolean
+  stellarGlints?: boolean
+  spectrum?: ObservationBand
+  radioExposure?: number
+  showCandidates?: boolean
+  cosmicAgeGyr?: number
+  densityGain?: number
   catalogRevision?: number
   navigation?: 'orbit' | 'pan'
 }
@@ -152,6 +164,7 @@ const particleFragment = `
 export class SpaceScene {
   private renderer: THREE.WebGLRenderer
   private scene = new THREE.Scene()
+  private spectralAppearance = new SpectralAppearance()
   private camera = new THREE.PerspectiveCamera(43, 1, 0.025, 500)
   private controls: OrbitControls
   private content = new THREE.Group()
@@ -219,6 +232,7 @@ export class SpaceScene {
   private loadedAssets = 0
   private failedAssets = new Set<string>()
   private skyLayer: THREE.Group | null = null
+  private earthMoonPair: { earth: THREE.Group; moon: THREE.Group; unit: number } | null = null
   private lastSkyTime = -Infinity
   private lastSkyFrame = -Infinity
   private onSelect: (id: string) => void
@@ -337,7 +351,7 @@ export class SpaceScene {
         '[data-world-id]',
       )?.dataset.worldId
       this.continuousMap.zoom(
-        Math.exp(THREE.MathUtils.clamp(event.deltaY * units * 0.0016, -40, 40)),
+        mapWheelZoomFactor(event.deltaY, event.deltaMode),
         new THREE.Vector2(
           ((event.clientX - bounds.left) / bounds.width) * 2 - 1,
           1 - ((event.clientY - bounds.top) / bounds.height) * 2,
@@ -534,6 +548,7 @@ export class SpaceScene {
         fallback.removeFromParent()
         disposeGroup(fallback)
         holder.add(root)
+        this.spectralAppearance.bind(holder, object)
         holder.rotation.set(0.24, -0.65, 0.12)
         holder.userData.modelReady = true
         holder.userData.modelState = 'ready'
@@ -778,11 +793,12 @@ export class SpaceScene {
   }
 
   private planet(object: CelestialObject, radius: number, detailed = false) {
-    if (object.kind === 'rogue-planet') return this.roguePlanet(object, radius)
+    if (object.kind === 'rogue-planet')
+      return this.roguePlanet(object, radius)
     const group = new THREE.Group()
     const surfaceMap = object.texture
       ? this.texture(object.texture)
-      : object.jovianMoon
+      : object.jovianMoon || object.martianMoon
         ? this.moonTexture(object)
         : null
     const material =
@@ -802,10 +818,39 @@ export class SpaceScene {
             bumpScale: 0.009,
           })
     const surface = new THREE.Mesh(
-      new THREE.SphereGeometry(radius, detailed ? 96 : 40, detailed ? 64 : 28),
+      new THREE.SphereGeometry(
+        radius,
+        detailed ? 96 : 40,
+        detailed ? 64 : 28,
+      ),
       material,
     )
+    if (object.martianMoon) {
+      const positions = surface.geometry.attributes.position
+      const noise = new ImprovedNoise()
+      const point = new THREE.Vector3()
+      for (let index = 0; index < positions.count; index++) {
+        point.fromBufferAttribute(positions, index).divideScalar(radius)
+        point.multiplyScalar(
+          1 + noise.noise(point.x * 3, point.y * 3, point.z * 3) * 0.06,
+        )
+        point
+          .multiply(
+            new THREE.Vector3(
+              object.id === 'phobos' ? 1.2 : 1.15,
+              0.92,
+              object.id === 'phobos' ? 0.8 : 0.88,
+            ),
+          )
+          .multiplyScalar(radius)
+        positions.setXYZ(index, point.x, point.y, point.z)
+      }
+      surface.geometry.computeVertexNormals()
+      this.renderer.domElement.dataset.moonMorphology =
+        'irregular-regolith-illustration'
+    }
     surface.rotation.y = object.id === 'earth' ? 4.15 : 0.4
+    surface.name = `body-surface-${object.id}`
     surface.userData.objectId = object.id
     group.add(surface)
     this.rotating.push({
@@ -827,7 +872,11 @@ export class SpaceScene {
       )
       clouds.rotation.y = surface.rotation.y
       group.add(clouds, this.atmosphere(radius * 1.025, '#7bbcff', 0.72))
-      this.rotating.push({ node: clouds, hours: 24.3, base: clouds.rotation.y })
+      this.rotating.push({
+        node: clouds,
+        hours: 24.3,
+        base: clouds.rotation.y,
+      })
     } else if (
       detailed &&
       ['venus', 'neptune', 'uranus', 'titan'].includes(object.id)
@@ -849,7 +898,10 @@ export class SpaceScene {
       const positions = ringGeometry.attributes.position
       const uv = ringGeometry.attributes.uv
       for (let index = 0; index < positions.count; index++) {
-        const length = Math.hypot(positions.getX(index), positions.getY(index))
+        const length = Math.hypot(
+          positions.getX(index),
+          positions.getY(index),
+        )
         uv.setXY(index, (length / radius - 1.24) / 1.06, 0.5)
       }
       const rings = new THREE.Mesh(
@@ -923,6 +975,7 @@ export class SpaceScene {
     } else {
       group.rotation.z = object.id === 'uranus' ? -1.7 : -0.12
     }
+    this.spectralAppearance.bind(group, object)
     return group
   }
 
@@ -957,6 +1010,7 @@ export class SpaceScene {
   private solarActivity(radius: number) {
     const activity = new THREE.Group()
     activity.name = 'solar-prominences-and-plasma'
+    activity.userData.emissionComponent = 'hot-gas'
     const random = seededRandom(20260916)
     const loopCount = this.options.highQuality ? 7 : 4
     for (let index = 0; index < loopCount; index++) {
@@ -1084,6 +1138,27 @@ export class SpaceScene {
 
   private star(object: CelestialObject, radius = 1.55) {
     const group = new THREE.Group()
+    if (object.kind === 'white-dwarf') {
+      const material = new THREE.ShaderMaterial({
+        uniforms: { uColor: { value: new THREE.Color(object.color) } },
+        vertexShader: `varying vec3 vNormal, vSight; void main() { vec4 view = modelViewMatrix * vec4(position, 1.0); vNormal = normalize(normalMatrix * normal); vSight = normalize(-view.xyz); gl_Position = projectionMatrix * view; }`,
+        fragmentShader: `uniform vec3 uColor; varying vec3 vNormal, vSight; void main() { float limb = pow(max(0.0, dot(normalize(vNormal), normalize(vSight))), 0.5); gl_FragColor = vec4(uColor * (0.4 + limb * 0.85), 1.0);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }`,
+      })
+      const surface = new THREE.Mesh(
+        new THREE.SphereGeometry(radius, 64, 40),
+        material,
+      )
+      surface.name = 'white-dwarf-photosphere'
+      surface.userData.objectId = object.id
+      group.add(surface)
+      this.spectralAppearance.bind(group, object)
+      this.renderer.domElement.dataset.whiteDwarfAppearance =
+        'compact-cooling-photosphere'
+      return group
+    }
     const material =
       object.id === 'sun'
         ? this.solarSurfaceMaterial()
@@ -1136,6 +1211,7 @@ export class SpaceScene {
       this.renderer.domElement.dataset.solarActivity =
         'prominences,plasma,granulation'
     }
+    this.spectralAppearance.bind(group, object)
     return group
   }
 
@@ -1181,6 +1257,52 @@ export class SpaceScene {
     if (dashed) line.computeLineDistances()
     this.orbitLines.push(line)
     return line
+  }
+
+  focusMarsRegion(id: string) {
+    if (this.view !== 'object' || this.selected.id !== 'mars') return
+    const region = marsRegions.find((item) => item.id === id)
+    const surface = this.content.getObjectByName('body-surface-mars') as
+      THREE.Mesh<THREE.SphereGeometry> | undefined
+    if (!region || !surface) return
+    this.interruptFlight()
+    this.labels = this.labels.filter((label) => {
+      if (!label.anchor.userData.surfaceRegion) return true
+      label.element.remove()
+      disposeGroup(label.anchor)
+      label.anchor.removeFromParent()
+      return false
+    })
+    const direction = new THREE.Vector3().setFromSphericalCoords(
+      1,
+      THREE.MathUtils.degToRad(90 - region.latitude),
+      THREE.MathUtils.degToRad(90 + region.longitude),
+    )
+    const marker = new THREE.Mesh(
+      new THREE.SphereGeometry(0.018, 12, 8),
+      new THREE.MeshBasicMaterial({ color: '#def4b0', depthTest: true }),
+    )
+    marker.position
+      .copy(direction)
+      .multiplyScalar(surface.geometry.parameters.radius * 1.008)
+    marker.userData.surfaceRegion = true
+    marker.userData.spectralAnnotation = true
+    surface.add(marker)
+    this.addLabel(region.name, 'mars', marker, 12)
+    surface.updateWorldMatrix(true, true)
+    const center = surface.getWorldPosition(new THREE.Vector3())
+    direction.applyQuaternion(
+      surface.getWorldQuaternion(new THREE.Quaternion()),
+    )
+    this.targetLookAt.copy(center)
+    this.targetCamera
+      .copy(direction)
+      .multiplyScalar(this.cameraDistance())
+      .add(center)
+    this.flying = true
+    this.renderer.domElement.dataset.flying = 'true'
+    this.renderer.domElement.dataset.marsRegion = region.id
+    this.renderer.domElement.dataset.marsRegionCoordinates = `${region.latitude},${region.longitude}`
   }
 
   private buildPlanet(object: CelestialObject) {
@@ -1722,7 +1844,7 @@ export class SpaceScene {
             new THREE.SphereGeometry(item.radius, 64, 40),
             new THREE.MeshBasicMaterial({ color: '#020405' }),
           )
-        : object.kind === 'star'
+        : object.kind === 'star' || object.kind === 'white-dwarf'
           ? this.star(object, item.radius)
           : this.planet(object, item.radius, true)
       body.position.set(item.center, item.radius - 2, 0)
@@ -1737,7 +1859,129 @@ export class SpaceScene {
     )
   }
 
+  private buildEarthMoon() {
+    const unit = 6 / 384400
+    const moonObject = objectById.get('moon')!
+    const earthModel = this.planet(earth, earth.radiusKm! * unit, true)
+    const moonModel = this.planet(
+      moonObject,
+      moonObject.radiusKm! * unit,
+      true,
+    )
+    this.content.add(earthModel, moonModel)
+    this.addLabel('Earth', 'earth', earthModel, 12)
+    this.addLabel('The Moon', 'moon', moonModel, 12)
+    this.earthMoonPair = { earth: earthModel, moon: moonModel, unit }
+    this.fitRadius = 4.3
+    this.updateEarthMoon()
+    this.renderer.domElement.dataset.systemRepresentation =
+      'earth-moon-physical-scale'
+    this.renderer.domElement.dataset.earthMoonRadii = JSON.stringify([
+      earth.radiusKm,
+      moonObject.radiusKm,
+    ])
+  }
+
+  private updateEarthMoon() {
+    if (!this.earthMoonPair) return
+    const { earth: earthModel, moon, unit } = this.earthMoonPair
+    const displacement = new THREE.Vector3(
+      ...getPosition(objectById.get('moon')!, new Date(this.timestamp)),
+    ).multiplyScalar(KM_PER_PARSEC / AU_PER_PARSEC)
+    this.renderer.domElement.dataset.earthMoonDistanceKm = String(
+      displacement.length(),
+    )
+    earthModel.position.copy(displacement).multiplyScalar(-unit * 0.5)
+    moon.position.copy(displacement).multiplyScalar(unit * 0.5)
+  }
+
+  private buildProxima(object: CelestialObject, single: boolean) {
+    const host = objectById.get('proxima')!
+    const planets = single
+      ? [object]
+      : object
+          .members!.map((id) => objectById.get(id)!)
+          .filter(
+            (member) =>
+              member.planetaryHost &&
+              (member.id !== 'proxima-c' || this.options.showCandidates),
+          )
+    const maximum = Math.max(
+      0.075,
+      ...planets.map((planet) => planet.orbit.semiMajorAxis!),
+    )
+    const compressed = this.options.compressed && maximum > 0.1
+    const scaledRadius = (axis: number) =>
+      6 * (compressed ? Math.sqrt(axis / maximum) : axis / maximum)
+    const star = this.star(host, 0.48)
+    this.content.add(star)
+    this.addLabel(host.name, host.id, star, 12)
+    this.fitRadius = 7.8
+    this.orbitPerspective = true
+    const zone = new THREE.Mesh(
+      new THREE.RingGeometry(scaledRadius(0.038), scaledRadius(0.075), 100),
+      new THREE.MeshBasicMaterial({
+        color: '#8fae92',
+        transparent: true,
+        opacity: 0.055,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    )
+    zone.rotation.x = -Math.PI / 2
+    zone.userData.spectralAnnotation = true
+    this.content.add(zone)
+    for (const planet of planets) {
+      const scale =
+        scaledRadius(planet.orbit.semiMajorAxis!) /
+        planet.orbit.semiMajorAxis!
+      const body = this.planet(
+        planet,
+        planet.id === 'proxima-c' ? 0.2 : 0.14,
+        true,
+      )
+      body.position
+        .fromArray(getPosition(planet, new Date(this.timestamp)))
+        .multiplyScalar(scale)
+      this.content.add(body)
+      this.entries.push({
+        node: body,
+        object: planet,
+        scale,
+        compressed: false,
+      })
+      this.addLabel(planet.name, planet.id, body, 12)
+      const path = sampleOrbit(planet, new Date(this.timestamp), 180).map(
+        (point) => new THREE.Vector3(...point).multiplyScalar(scale),
+      )
+      this.content.add(
+        this.line(
+          path,
+          planet.id === 'proxima-c' ? '#b7a193' : '#9ac7c1',
+          planet.id === 'proxima-c' ? 0.2 : 0.4,
+        ),
+      )
+    }
+    this.renderer.domElement.dataset.systemRepresentation =
+      'proxima-host-relative-kepler-illustration'
+    this.renderer.domElement.dataset.systemMembers = [
+      'proxima',
+      ...planets.map((planet) => planet.id),
+    ].join(',')
+    this.renderer.domElement.dataset.systemSpacing = compressed
+      ? 'compressed'
+      : 'linear'
+  }
+
   private buildSystem(object: CelestialObject, single: boolean) {
+    if (object.visualization === 'earth-moon') {
+      this.buildEarthMoon()
+      return
+    }
+    if (object.visualization === 'proxima-system' || object.planetaryHost) {
+      this.buildProxima(object, single)
+      return
+    }
     const isMoon = object.kind === 'moon'
     const primary = isMoon
       ? objectById.get(object.parent ?? 'earth')!
@@ -1762,7 +2006,7 @@ export class SpaceScene {
       const scale = single
         ? 6 /
           Math.max(
-            0.001,
+            isMoon ? 1e-9 : 0.001,
             planet.trajectory
               ? Math.max(
                   ...sampleOrbit(planet, date).map((point) =>
@@ -1799,9 +2043,9 @@ export class SpaceScene {
       this.entries.push({ node: model, object: planet, scale, compressed })
       this.addLabel(planet.name, planet.id, model, 15)
       const points = sampleOrbit(planet, date, 220).map((point) =>
-        new THREE.Vector3(...displayPosition(point, compressed)).multiplyScalar(
-          scale,
-        ),
+        new THREE.Vector3(
+          ...displayPosition(point, compressed),
+        ).multiplyScalar(scale),
       )
       this.content.add(
         this.line(
@@ -1848,6 +2092,7 @@ export class SpaceScene {
           ).normalize(),
         },
         uActiveNucleus: { value: activeNucleus ? 1 : 0 },
+        uTonPalette: { value: 0 },
         uAccreting: { value: 1 },
         uSpaceInverse: { value: new THREE.Matrix4() },
       },
@@ -1860,7 +2105,7 @@ export class SpaceScene {
         }
       `,
       fragmentShader: `
-        uniform float uTime, uActiveNucleus, uAccreting;
+        uniform float uTime, uActiveNucleus, uAccreting, uTonPalette;
         uniform vec3 uColor, uDiskNormal;
         uniform mat4 uSpaceInverse;
         varying vec3 vWorld;
@@ -1892,8 +2137,9 @@ export class SpaceScene {
           float temperature = pow(innerDisk / radius, 0.75);
           vec3 cool = mix(vec3(0.72, 0.19, 0.045), uColor * vec3(0.65, 0.26, 0.09), 0.35);
           cool = mix(cool, vec3(0.36, 0.09, 0.27), uActiveNucleus * 0.55);
-          vec3 warm = vec3(1.0, 0.6, 0.22);
-          vec3 hot = vec3(1.0, 0.94, 0.78);
+          cool = mix(cool, vec3(0.75, 0.21, 0.055), uTonPalette);
+          vec3 warm = mix(vec3(1.0, 0.6, 0.22), vec3(1.0, 0.7, 0.4), uTonPalette);
+          vec3 hot = mix(vec3(1.0, 0.94, 0.78), vec3(0.64, 0.83, 1.0), uTonPalette);
           vec3 emission = mix(cool, warm, smoothstep(0.38, 0.72, temperature));
           emission = mix(emission, hot, smoothstep(0.72, 1.0, temperature));
           float velocity = sqrt(horizon / (2.0 * max(radius - horizon, 0.1)));
@@ -2019,6 +2265,7 @@ export class SpaceScene {
     })
     const group = new THREE.Group()
     group.name = 'pulsing-polar-jet'
+    group.userData.emissionComponent = 'nonthermal'
     this.shaders.push(material)
     group.add(new THREE.Mesh(geometry, material))
     const coreMaterial = material.clone()
@@ -2040,6 +2287,9 @@ export class SpaceScene {
       this.blackHoleMaterial(object.color, object.kind === 'quasar'),
     )
     image.material.uniforms.uAccreting.value = accreting ? 1 : 0
+    image.material.uniforms.uTonPalette.value = object.id === 'ton618' ? 1 : 0
+    if (this.selected.id === object.id && object.id === 'ton618')
+      this.renderer.domElement.dataset.quasarAppearance = 'cool-core-warm-disk'
     image.name = accreting
       ? 'ray-bent-accretion-disk'
       : 'dormant-black-hole-shadow'
@@ -2311,6 +2561,7 @@ export class SpaceScene {
         fallback.removeFromParent()
         disposeGroup(fallback)
         holder.add(cloud)
+        this.spectralAppearance.bind(holder, object)
         holder.userData.modelReady = true
         holder.userData.modelState = 'ready'
         holder.userData.modelParticles = sizes.length
@@ -2423,9 +2674,12 @@ export class SpaceScene {
     referenceOnly = false,
   ) {
     const points = this.particles(positions, colors, sizes, opacity)
+    points.userData.emissionComponent = diffuse ? 'dust' : 'photosphere'
     const referenceColors: number[] = []
     const referenceSizes: number[] = []
+    const accents: number[] = []
     const referenceRandom = seededRandom(diffuse ? 9127 : 9126)
+    const accentRandom = seededRandom(19083)
     const neutral = new THREE.Color('#cdd7e5')
     const golden = new THREE.Color('#edca81')
     const amber = new THREE.Color('#d3a27a')
@@ -2455,6 +2709,13 @@ export class SpaceScene {
       referenceSizes.push(
         sizes[index] * (diffuse ? (referenceOnly ? 1 : 1.8) : 1.05),
       )
+      const accent = accentRandom()
+      accents.push(
+        !diffuse && sizes[index] > 0.055 && accent > 0.96
+          ? 0.65 + (accent - 0.96) * 8.75
+          : 0,
+        accentRandom() * Math.PI * 0.5,
+      )
     }
     points.geometry.setAttribute(
       'aReferenceColor',
@@ -2464,26 +2725,39 @@ export class SpaceScene {
       'aReferenceSize',
       new THREE.Float32BufferAttribute(referenceSizes, 1),
     )
-    points.material.uniforms.uViewportHeight = { value: this.host.clientHeight }
+    points.geometry.setAttribute(
+      'aAccent',
+      new THREE.Float32BufferAttribute(accents, 2),
+    )
+    points.material.uniforms.uViewportHeight = {
+      value: this.host.clientHeight,
+    }
     points.material.uniforms.uDiffuse = { value: diffuse ? 1 : 0 }
     points.material.uniforms.uReferenceStyle = {
       value: this.options.galaxyStyle === 'reference' ? 1 : 0,
     }
     points.material.uniforms.uReferenceOnly = { value: referenceOnly ? 1 : 0 }
+    points.material.uniforms.uStellarGlints = { value: 1 }
     points.material.uniforms.uInterior = { value: 0 }
+    points.material.uniforms.uOverview = { value: 0 }
+    points.material.uniforms.uOverviewContrast = { value: 0 }
     points.material.uniforms.uDustMap = { value: null }
     points.material.uniforms.uDustStrength = { value: 0 }
     points.material.uniforms.uDustSteps = { value: 8 }
     points.material.uniforms.uObserver = { value: new THREE.Vector3() }
     points.userData.referenceOnly = referenceOnly
-    points.visible = !referenceOnly || this.options.galaxyStyle === 'reference'
+    points.visible =
+      !referenceOnly || this.options.galaxyStyle === 'reference'
     points.material.vertexShader = `
       attribute float aSize, aReferenceSize;
+      attribute vec2 aAccent;
       attribute vec3 aReferenceColor;
       varying vec3 vColor;
       varying vec3 vTransmission;
       varying float vVisibility;
-      uniform float uPixelRatio, uViewportHeight, uDiffuse, uReferenceStyle, uReferenceOnly, uInterior;
+      varying vec2 vAccent;
+      varying float vStarScale;
+      uniform float uPixelRatio, uViewportHeight, uDiffuse, uReferenceStyle, uReferenceOnly, uInterior, uOverview, uStellarGlints;
       uniform sampler2D uDustMap;
       uniform float uDustStrength, uDustSteps;
       uniform vec3 uObserver;
@@ -2521,13 +2795,16 @@ export class SpaceScene {
         stellarPosition.y *= mix(1.0, 0.6 + bulge * 0.4, uReferenceStyle * (1.0 - uReferenceOnly));
         vTransmission = dustTransmission(stellarPosition);
         float size = mix(aSize, aReferenceSize, uReferenceStyle) * mix(1.0, 0.72, uInterior * (1.0 - uDiffuse));
+        size *= mix(1.0, 1.5, uOverview * uDiffuse);
         vec4 viewPosition = modelViewMatrix * vec4(stellarPosition, 1.0);
         float worldScale = length(modelMatrix[0].xyz);
         float projectedSize = size * worldScale * projectionMatrix[1][1] * uViewportHeight * 0.5 / max(-viewPosition.z, 0.0001);
         float minimumSize = mix(2.8, 1.5, uDiffuse);
         vVisibility = pow(min(1.0, projectedSize / minimumSize), 2.0) * smoothstep(0.0, aSize * worldScale * 0.8, -viewPosition.z);
         float maximumSize = mix(mix(56.0, 110.0, uDiffuse), mix(30.0, 48.0, uDiffuse), uInterior);
-        gl_PointSize = clamp(projectedSize, minimumSize, maximumSize) * uPixelRatio;
+        vAccent = vec2(aAccent.x * uReferenceStyle * uStellarGlints * (1.0 - uOverview) * smoothstep(3.0, 10.0, projectedSize), aAccent.y);
+        vStarScale = 1.0 + vAccent.x * 0.8;
+        gl_PointSize = clamp(projectedSize, minimumSize, maximumSize) * vStarScale * uPixelRatio;
         gl_Position = projectionMatrix * viewPosition;
       }
     `
@@ -2535,14 +2812,22 @@ export class SpaceScene {
       varying vec3 vColor;
       varying vec3 vTransmission;
       varying float vVisibility;
-      uniform float uOpacity, uDiffuse, uReferenceStyle, uInterior;
+      varying vec2 vAccent;
+      varying float vStarScale;
+      uniform float uOpacity, uDiffuse, uReferenceStyle, uInterior, uOverviewContrast;
       void main() {
         vec2 point = gl_PointCoord - 0.5;
         float radius = length(point) * 2.0;
         if (radius > 1.0) discard;
-        float core = exp(-radius * radius * mix(65.0, 78.0, uReferenceStyle));
-        float halo = exp(-radius * radius * mix(5.0, 6.0, uReferenceStyle * (1.0 - uDiffuse)));
-        float profile = mix(core * mix(1.45, mix(1.8, 4.2, uInterior), uReferenceStyle) + halo * mix(0.15, mix(0.12, 0.045, uInterior), uReferenceStyle), halo, uDiffuse);
+        float stellarRadius = radius * vStarScale;
+        float core = exp(-stellarRadius * stellarRadius * mix(65.0, 78.0, uReferenceStyle));
+        float halo = exp(-stellarRadius * stellarRadius * mix(5.0, 6.0, uReferenceStyle * (1.0 - uDiffuse)));
+        float profile = mix(core * mix(1.45, mix(mix(1.8, 0.95, uOverviewContrast), 4.2, uInterior), uReferenceStyle) + halo * mix(0.15, mix(mix(0.12, 0.065, uOverviewContrast), 0.045, uInterior), uReferenceStyle), halo, uDiffuse);
+        vec2 axes = mat2(cos(vAccent.y), -sin(vAccent.y), sin(vAccent.y), cos(vAccent.y)) * point * 2.0;
+        float crossSection = min(abs(axes.x), abs(axes.y));
+        float rayLength = max(abs(axes.x), abs(axes.y));
+        float rays = exp(-crossSection / max(0.012, fwidth(crossSection))) * pow(max(0.0, 1.0 - rayLength), 2.4);
+        profile += vAccent.x * (rays * 1.65 + exp(-radius * radius * 9.0) * 0.12);
         float edge = 1.0 - smoothstep(0.75, 1.0, radius);
         vec3 light = mix(vColor, mix(vColor, vec3(1.0), core * mix(0.1, 0.035, uReferenceStyle)), 1.0 - uDiffuse);
         light *= vTransmission;
@@ -2574,26 +2859,45 @@ export class SpaceScene {
       const interior = reference
         ? 1 - THREE.MathUtils.smoothstep(observer.length(), 1.5, 7)
         : 0
+      const overview = reference
+        ? THREE.MathUtils.smoothstep(observer.length(), 5.5, 13)
+        : 0
       points.material.uniforms.uInterior.value = interior
+      points.material.uniforms.uOverview.value = overview
       points.material.uniforms.uReferenceStyle.value = reference ? 1 : 0
       points.material.blending =
         reference && diffuse ? THREE.NormalBlending : THREE.AdditiveBlending
       this.renderer.domElement.dataset.galaxyStyle = reference
         ? 'reference'
         : 'original'
+      const glints = reference && this.options.stellarGlints !== false
+      points.material.uniforms.uStellarGlints.value = glints ? 1 : 0
+      this.renderer.domElement.dataset.galaxyGlints = glints
+        ? 'selective-distance-faded'
+        : 'disabled'
       points.material.uniforms.uViewportHeight.value = this.host.clientHeight
-      points.material.uniforms.uPixelRatio.value = this.renderer.getPixelRatio()
+      points.material.uniforms.uPixelRatio.value =
+        this.renderer.getPixelRatio()
       normal.set(0, 1, 0).transformDirection(points.matrixWorld)
       sight
         .setFromMatrixPosition(points.matrixWorld)
         .sub(this.camera.position)
         .normalize()
-      const alignment = THREE.MathUtils.clamp(Math.abs(normal.dot(sight)), 0, 1)
+      const alignment = THREE.MathUtils.clamp(
+        Math.abs(normal.dot(sight)),
+        0,
+        1,
+      )
+      points.material.uniforms.uOverviewContrast.value =
+        overview * THREE.MathUtils.smoothstep(alignment, 0.15, 0.65)
       points.material.uniforms.uOpacity.value =
         opacity *
         (diffuse ? (reference ? 2.4 : 0.55) : reference ? 0.82 : 1) *
+        (1 + (diffuse ? overview * 0.15 : 0)) *
         (reference ? 0.2 + alignment * 0.8 : 0.16 + alignment * 0.84) *
         (1 - interior * (diffuse ? 0.78 : 0))
+      this.renderer.domElement.dataset.galaxyOverviewBlend =
+        overview.toFixed(3)
       this.renderer.domElement.dataset.galaxyInclination =
         THREE.MathUtils.radToDeg(Math.acos(alignment)).toFixed(2)
     }
@@ -2623,27 +2927,38 @@ export class SpaceScene {
     const color = new THREE.Color()
     const warm = new THREE.Color('#fff0d6')
     const milkyWay = object.id === 'milky-way'
+    const triplet = object.parent === 'ngc-6769-group'
+    const lenticular = object.id === 'ngc-6771'
     const arms = object.id === 'triangulum' ? 3 : 2
     const barAngle = milkyWay ? 0.7 : 0
-    const count = this.buildingWorldVisual
-      ? 65000
-      : this.options.highQuality
-        ? 180000
-        : 85000
+    const count = triplet
+      ? this.options.highQuality
+        ? 48000
+        : 24000
+      : this.buildingWorldVisual
+        ? 65000
+        : this.options.highQuality
+          ? 180000
+          : 85000
     for (let index = 0; index < count; index++) {
-      const bulge = index < count * 0.11
-      const bar = milkyWay && index >= count * 0.11 && index < count * 0.24
+      const bulge = index < count * (lenticular ? 0.4 : 0.11)
+      const bar =
+        (milkyWay || object.id === 'ngc-6770') &&
+        index >= count * 0.11 &&
+        index < count * 0.24
       const radial = bulge
         ? Math.pow(random(), 1.5) * 1.15
         : 0.65 + Math.pow(random(), 0.8) * 4.7
       const arm = (Math.floor(random() * arms) * Math.PI * 2) / arms
-      const angle = bulge
-        ? random() * Math.PI * 2
-        : barAngle +
-          Math.log(Math.max(radial, 1.15) / 1.15) * 2.8 +
-          arm +
-          (index % 7 === 0 ? Math.PI * 0.5 : 0) +
-          (random() + random() - 1) * (index % 3 === 0 ? 3.5 : 0.23)
+      const angle =
+        bulge || lenticular
+          ? random() * Math.PI * 2
+          : barAngle +
+            Math.log(Math.max(radial, 1.15) / 1.15) *
+              (object.id === 'ngc-6769' ? 3.6 : 2.8) +
+            arm +
+            (index % 7 === 0 ? Math.PI * 0.5 : 0) +
+            (random() + random() - 1) * (index % 3 === 0 ? 3.5 : 0.23)
       const scatter =
         (random() + random() - 1) * (bulge ? 0.55 : bar ? 0.2 : 0.12)
       const barLength = (random() + random() + random() - 1.5) * 1.55
@@ -2665,7 +2980,7 @@ export class SpaceScene {
             : index % 43 === 0
               ? '#d9c4c4'
               : '#e4e8ed'
-          : bulge || bar
+          : bulge || bar || lenticular
             ? '#ffd7a2'
             : index % 43 === 0
               ? '#f7a5bb'
@@ -2681,8 +2996,18 @@ export class SpaceScene {
     }
     const galaxy = new THREE.Group()
     galaxy.name = 'galaxy-volume'
-    galaxy.rotation.x = milkyWay ? 0.42 : object.id === 'andromeda' ? 0.2 : 0.45
+    galaxy.rotation.x = milkyWay
+      ? 0.42
+      : object.id === 'andromeda'
+        ? 0.2
+        : 0.45
     galaxy.rotation.z = milkyWay ? -0.1 : -0.24
+    if (triplet)
+      galaxy.rotation.set(
+        lenticular ? 0.22 : object.id === 'ngc-6769' ? 0.85 : 1.05,
+        0,
+        lenticular ? -0.6 : object.id === 'ngc-6769' ? -0.2 : 0.55,
+      )
     const stellarDisk = milkyWay
       ? this.galaxyParticles(
           positions,
@@ -2690,7 +3015,15 @@ export class SpaceScene {
           sizes.map((size) => size * 2.5),
           0.8,
         )
-      : this.particles(positions, colors, sizes, 0.15)
+      : triplet
+        ? this.volumeParticles(
+            positions,
+            colors,
+            sizes.map((size) => size * 2.2),
+            0.4,
+          )
+        : this.particles(positions, colors, sizes, 0.15)
+    if (triplet) stellarDisk.material.blending = THREE.NormalBlending
     stellarDisk.name = 'resolved-stellar-disk'
     stellarDisk.renderOrder = 1
     galaxy.add(stellarDisk)
@@ -2702,15 +3035,20 @@ export class SpaceScene {
           diameters: number[],
           strength: number,
         ) => this.galaxyParticles(locations, tones, diameters, strength, true)
-      : this.particles.bind(this)
+      : triplet
+        ? this.volumeParticles.bind(this)
+        : this.particles.bind(this)
     const haze = makeHaze(
       positions.filter((_, index) => Math.floor(index / 3) % 8 === 0),
       hazeColors.filter((_, index) => Math.floor(index / 3) % 8 === 0),
-      sizes.filter((_, index) => index % 8 === 0).map(() => 0.17),
-      milkyWay ? 0.05 : 0.018,
+      sizes
+        .filter((_, index) => index % 8 === 0)
+        .map(() => (triplet ? 0.25 : 0.17)),
+      milkyWay ? 0.05 : triplet ? 0.055 : 0.018,
     )
+    if (triplet) haze.material.blending = THREE.NormalBlending
     galaxy.add(haze)
-    if (!milkyWay) {
+    if (!milkyWay && !triplet) {
       const dustMaterial = new THREE.ShaderMaterial({
         uniforms: {
           uArms: { value: arms },
@@ -2860,8 +3198,11 @@ export class SpaceScene {
                 THREE.MathUtils.clamp(horizontal, 0, 1023)) *
               4
             return (
-              Math.max(pixels[offset], pixels[offset + 1], pixels[offset + 2]) /
-              255
+              Math.max(
+                pixels[offset],
+                pixels[offset + 1],
+                pixels[offset + 2],
+              ) / 255
             )
           }
           for (let vertical = 0; vertical < 256; vertical++) {
@@ -2942,7 +3283,10 @@ export class SpaceScene {
             0.16
           const height =
             THREE.MathUtils.clamp(normalSample(), -3, 3) *
-              (0.065 + radial * 0.009 + bulge * 0.5 + (thickDisk ? 0.19 : 0)) +
+              (0.065 +
+                radial * 0.009 +
+                bulge * 0.5 +
+                (thickDisk ? 0.19 : 0)) +
             warp
           maximumHeight = Math.max(maximumHeight, Math.abs(height))
           imagePositions.push(
@@ -3088,6 +3432,7 @@ export class SpaceScene {
         )
         bulgeGlow.name = 'reference-bulge-starlight'
         galaxy.add(bulgeGlow)
+        this.spectralAppearance.bind(galaxy, object)
         galaxy.userData.particleDepth = maximumHeight * 2
         this.renderer.domElement.dataset.galaxyTextureReady = 'true'
         this.renderer.domElement.dataset.galaxyParticleDepth = (
@@ -3148,7 +3493,86 @@ export class SpaceScene {
     }
   }
 
+  private buildGalaxyGroup(object: CelestialObject) {
+    this.fitRadius = 6.4
+    const unit = object.skyPosition!.radiusPc / 6.4
+    const origin = new THREE.Vector3(...referencePositionPc(object)!)
+    const diagram = new THREE.Group()
+    diagram.name = 'catalog-galaxy-triplet'
+    const members = object.members!.map((id) => {
+      const member = objectById.get(id)!
+      const position = new THREE.Vector3(...referencePositionPc(member)!)
+        .sub(origin)
+        .divideScalar(unit)
+      if (!this.buildingWorldVisual) {
+        const galaxy = this.createWorldVisual(member)
+        galaxy.position.copy(position)
+        galaxy.scale.setScalar(member.skyPosition!.radiusPc / (5.65 * unit))
+        galaxy.traverse((node) => {
+          if ((node as THREE.Points).isPoints) node.userData.objectId = id
+        })
+        diagram.add(galaxy)
+        this.addLabel(member.name, member.id, galaxy, 18)
+      }
+      return position
+    })
+    const random = seededRandom(6769)
+    const positions: number[] = [],
+      colors: number[] = [],
+      sizes: number[] = []
+    const color = new THREE.Color()
+    const point = new THREE.Vector3()
+    for (const [first, second] of [
+      [0, 1],
+      [0, 2],
+    ]) {
+      const start = members[first],
+        end = members[second]
+      const control = start
+        .clone()
+        .lerp(end, 0.5)
+        .add(new THREE.Vector3(0.3, 0.15, -0.25))
+      const curve = new THREE.QuadraticBezierCurve3(start, control, end)
+      for (let index = 0; index < 2600; index++) {
+        const progress = random()
+        curve.getPoint(progress, point)
+        const spread = 0.06 + Math.sin(progress * Math.PI) * 0.13
+        point.add(
+          new THREE.Vector3(
+            random() - 0.5,
+            random() - 0.5,
+            random() - 0.5,
+          ).multiplyScalar(spread),
+        )
+        positions.push(...point.toArray())
+        color
+          .set(index % 4 === 0 ? '#ddbd95' : '#9fbccf')
+          .multiplyScalar(0.3 + random() * 0.3)
+        colors.push(color.r, color.g, color.b)
+        sizes.push(0.025 + random() * 0.04)
+      }
+    }
+    const tails = this.volumeParticles(positions, colors, sizes, 0.24)
+    tails.material.blending = THREE.NormalBlending
+    tails.name = 'illustrative-tidal-trails'
+    diagram.add(tails)
+    if (!this.buildingWorldVisual)
+      diagram.quaternion.setFromUnitVectors(
+        origin.clone().negate().normalize(),
+        new THREE.Vector3(0.15, 0.3, 1).normalize(),
+      )
+    this.content.add(diagram)
+    this.renderer.domElement.dataset.groupRepresentation =
+      'catalog-triplet-with-tidal-trails'
+    this.renderer.domElement.dataset.structureMembers =
+      object.members!.join(',')
+  }
+
   private buildCluster(object: CelestialObject) {
+    if (object.members && object.skyPosition) {
+      this.buildGalaxyGroup(object)
+      return
+    }
     this.fitRadius = 6.4
     const random = seededRandom(hashId(object.id))
     const positions: number[] = []
@@ -3162,17 +3586,31 @@ export class SpaceScene {
         (random() - 0.5) * 6,
         (random() - 0.5) * 7,
       )
-      if (galaxyIndex === 0) center = new THREE.Vector3(-2.4, -0.2, 0.5)
-      if (galaxyIndex === 1) center = new THREE.Vector3(2.1, 1.3, -1)
-      if (galaxyIndex === 2) center = new THREE.Vector3(3.1, -1.5, 0)
+      if (local) {
+        if (galaxyIndex === 0) center = new THREE.Vector3(-2.4, -0.2, 0.5)
+        if (galaxyIndex === 1) center = new THREE.Vector3(2.1, 1.3, -1)
+        if (galaxyIndex === 2) center = new THREE.Vector3(3.1, -1.5, 0)
+      } else {
+        center.normalize().multiplyScalar(5.2 * Math.pow(random(), 0.85))
+        center.y *= 0.7
+        if (galaxyIndex % 5 === 1)
+          center.multiplyScalar(0.4).add(new THREE.Vector3(2.8, 0.8, -0.8))
+        if (galaxyIndex === 0) center.set(0, 0, 0)
+        if (galaxyIndex === 1) center.set(2.8, 0.8, -0.8)
+        if (galaxyIndex === 2) center.set(-2.1, -0.6, 1.2)
+      }
       const radius = galaxyIndex < 3 ? 0.7 : 0.08 + random() * 0.24
       const tilt = new THREE.Euler(random(), random() * 2, random() * 2)
+      const elliptical =
+        !local &&
+        (galaxyIndex < 3 || (center.length() < 2.5 && random() < 0.7))
+      const tone = new THREE.Color(elliptical ? '#f1d3a4' : '#b4cbdc')
       for (
         let pointIndex = 0;
         pointIndex < (galaxyIndex < 3 ? 1500 : 80);
         pointIndex++
       ) {
-        const radial = Math.pow(random(), 1.1) * radius
+        const radial = Math.pow(random(), elliptical ? 1 / 3 : 1.1) * radius
         const angle =
           (radial / radius) * 5 +
           Math.floor(random() * 2) * Math.PI +
@@ -3182,10 +3620,32 @@ export class SpaceScene {
           (random() - 0.5) * radius * 0.15,
           Math.sin(angle) * radial,
         )
-          .applyEuler(tilt)
-          .add(center)
+        if (elliptical) {
+          const azimuth = random() * Math.PI * 2
+          const vertical = random() * 2 - 1
+          const spread = Math.sqrt(1 - vertical * vertical)
+          point.set(
+            Math.cos(azimuth) * spread * radial,
+            vertical * radial * 0.65,
+            Math.sin(azimuth) * spread * radial * 0.8,
+          )
+        }
+        point.applyEuler(tilt).add(center)
         positions.push(point.x, point.y, point.z)
-        colors.push(0.9, 0.76 + random() * 0.2, 0.64 + random() * 0.3)
+        if (local)
+          colors.push(0.9, 0.76 + random() * 0.2, 0.64 + random() * 0.3)
+        else {
+          const luminosity =
+            (0.6 + random() * 0.4) *
+            (elliptical
+              ? 0.25 + 0.75 * Math.exp(-3 * Math.pow(radial / radius, 2))
+              : 1)
+          colors.push(
+            tone.r * luminosity,
+            tone.g * luminosity,
+            tone.b * luminosity,
+          )
+        }
         sizes.push(0.025 + random() * 0.075)
       }
       if (local && galaxyIndex < 3) {
@@ -3204,105 +3664,375 @@ export class SpaceScene {
         this.addLabel(objectById.get(id)!.name, id, marker, 22)
       }
     }
-    this.content.add(this.particles(positions, colors, sizes, 0.9))
+    const starlight = local
+      ? this.particles(positions, colors, sizes, 0.9)
+      : this.volumeParticles(positions, colors, sizes, 0.2)
+    starlight.userData.emissionComponent = 'photosphere'
+    this.content.add(starlight)
+    if (!local) {
+      const gasPositions: number[] = [],
+        gasColors: number[] = [],
+        gasSizes: number[] = []
+      for (let index = 0; index < 4000; index++) {
+        const radius = Math.pow(random(), 0.8) * 5.2
+        const point = new THREE.Vector3(
+          random() - 0.5,
+          random() - 0.5,
+          random() - 0.5,
+        )
+          .normalize()
+          .multiplyScalar(radius)
+        gasPositions.push(point.x, point.y * 0.72, point.z)
+        gasColors.push(0.4, 0.7, 0.82)
+        gasSizes.push(0.28 + random() * 0.5)
+      }
+      const gas = this.volumeParticles(
+        gasPositions,
+        gasColors,
+        gasSizes,
+        0.055,
+      )
+      gas.material.blending = THREE.NormalBlending
+      gas.name = 'illustrative-intracluster-xray-gas'
+      gas.userData.emissionComponent = 'hot-gas'
+      gas.userData.spectralBands = ['xray']
+      gas.visible = this.options.spectrum === 'xray'
+      this.content.add(gas)
+    }
+    this.renderer.domElement.dataset.clusterRepresentation = local
+      ? 'galaxy-group'
+      : 'concentrated-galaxies'
   }
 
-  private buildVoid(object: CelestialObject) {
+  private buildVoid() {
     this.fitRadius = 7.2
-    const random = seededRandom(hashId(object.id))
+    if (!this.buildingWorldVisual) this.starfield.visible = false
+    this.renderer.domElement.dataset.voidRepresentation =
+      'non-emitting-reference-region'
+    this.renderer.domElement.dataset.voidInteriorMarkers = '0'
+    this.renderer.domElement.dataset.voidSurfaceLayers = '0'
+  }
+
+  private buildLaniakea(object: CelestialObject) {
+    this.fitRadius = 7
+    const unit = LANIAKEA_RADIUS_PC / 6.4
+    const random = seededRandom(2014)
+    const target = new THREE.Vector3(
+      ...referencePositionPc(objectById.get('norma-cluster')!)!,
+    ).divideScalar(unit)
     const positions: number[] = [],
       colors: number[] = [],
       sizes: number[] = []
-    const nodes: THREE.Vector3[] = []
+    const tracks: number[] = [],
+      trackColors: number[] = []
+    const starts: number[] = [],
+      controls: number[] = [],
+      ends: number[] = [],
+      phases: number[] = []
+    const cool = new THREE.Color('#8cbacb')
+    const warm = new THREE.Color('#efc78b')
     const color = new THREE.Color()
-    for (let index = 0; index < 160; index++) {
-      const vertical = random() * 2 - 1
-      const azimuth = random() * Math.PI * 2
-      const radius = 4.3 + random() * 2.2 + Math.sin(azimuth * 3) * 0.25
-      const spread = Math.sqrt(1 - vertical * vertical)
-      nodes.push(
-        new THREE.Vector3(
-          Math.cos(azimuth) * spread * radius,
-          vertical * radius * 0.85,
-          Math.sin(azimuth) * spread * radius,
-        ),
-      )
-    }
-    for (const [nodeIndex, node] of nodes.entries()) {
-      const nearby = nodes
-        .map((neighbor, index) => ({
-          neighbor,
-          index,
-          distance: node.distanceTo(neighbor),
-        }))
-        .filter(({ index, distance }) => index > nodeIndex && distance < 2.2)
-        .sort((first, second) => first.distance - second.distance)
-        .slice(0, 3)
-      for (const { neighbor } of nearby) {
-        for (let index = 0; index < 80; index++) {
-          const point = node.clone().lerp(neighbor, random())
-          point.add(
-            new THREE.Vector3(
-              random() - 0.5,
-              random() - 0.5,
-              random() - 0.5,
-            ).multiplyScalar(0.22),
-          )
-          if (point.length() < 4) continue
-          positions.push(...point.toArray())
+    const previous = new THREE.Vector3()
+    const current = new THREE.Vector3()
+    const members = object.members!.map((id) => {
+      const member = objectById.get(id)!
+      const position = new THREE.Vector3(
+        ...referencePositionPc(member)!,
+      ).divideScalar(unit)
+      const marker = new THREE.Object3D()
+      marker.position.copy(position)
+      this.content.add(marker)
+      this.addLabel(member.name, member.id, marker, 12)
+      if (!this.buildingWorldVisual) {
+        const count = id === 'norma-cluster' ? 1100 : 600
+        for (let index = 0; index < count; index++) {
+          const spread = 0.04 + Math.pow(random(), 1.3) * 0.28
+          current
+            .set(random() - 0.5, random() - 0.5, random() - 0.5)
+            .normalize()
+            .multiplyScalar(spread)
+            .add(position)
+          positions.push(...current.toArray())
           color
-            .set(index % 5 === 0 ? '#edd5ad' : '#9fbbd1')
-            .multiplyScalar(0.32 + random() * 0.5)
+            .copy(id === 'norma-cluster' ? warm : cool)
+            .multiplyScalar(0.5 + random() * 0.5)
           colors.push(color.r, color.g, color.b)
-          sizes.push(0.035 + random() * 0.075)
+          sizes.push(0.025 + random() * 0.045)
         }
       }
-      for (let index = 0; index < 18; index++) {
-        const spread = random() * 0.14
-        positions.push(
-          node.x + (random() - 0.5) * spread,
-          node.y + (random() - 0.5) * spread,
-          node.z + (random() - 0.5) * spread,
-        )
-        colors.push(0.7, 0.64, 0.5)
-        sizes.push(0.03 + random() * 0.09)
-      }
-    }
-    for (let index = 0; index < 18; index++) {
-      const point = new THREE.Vector3(
+      return position
+    })
+    this.content.add(this.buildCosmicWeb(object, members))
+    const count = this.options.highQuality ? 128 : 80
+    for (let index = 0; index < count; index++) {
+      const start = new THREE.Vector3(
         random() - 0.5,
         random() - 0.5,
         random() - 0.5,
       )
         .normalize()
-        .multiplyScalar(Math.cbrt(random()) * 3.7)
-      positions.push(...point.toArray())
-      colors.push(0.55, 0.65, 0.73)
-      sizes.push(0.07)
+        .multiplyScalar(3.2 + random() * 3.2)
+      if (index < 32) start.multiplyScalar(0.12).add(members[index % 3])
+      const end = target
+        .clone()
+        .add(
+          new THREE.Vector3(
+            random() - 0.5,
+            random() - 0.5,
+            random() - 0.5,
+          ).multiplyScalar(0.4),
+        )
+      const control = start.clone().lerp(end, 0.45)
+      control.add(
+        new THREE.Vector3(-start.z, start.x * 0.3, start.x).multiplyScalar(
+          0.5,
+        ),
+      )
+      const curve = new THREE.QuadraticBezierCurve3(start, control, end)
+      for (let sample = 1; sample <= 56; sample++) {
+        curve.getPoint((sample - 1) / 56, previous)
+        curve.getPoint(sample / 56, current)
+        tracks.push(...previous.toArray(), ...current.toArray())
+        color.copy(cool).lerp(warm, sample / 56)
+        trackColors.push(color.r, color.g, color.b, color.r, color.g, color.b)
+      }
+      for (let sample = 0; sample < 12; sample++) {
+        starts.push(...start.toArray())
+        controls.push(...control.toArray())
+        ends.push(...end.toArray())
+        phases.push((sample + random() * 0.3) / 12)
+      }
     }
-    const web = this.volumeParticles(positions, colors, sizes, 0.82)
-    web.name = 'void-surrounding-galaxy-filaments'
-    this.content.add(web)
-    this.renderer.domElement.dataset.voidRepresentation =
-      'sparse-galaxies-no-surface'
-    this.renderer.domElement.dataset.voidInteriorMarkers = '18'
+    const flow = new THREE.Group()
+    flow.name = 'laniakea-flow-traces'
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(tracks, 3),
+    )
+    geometry.setAttribute(
+      'color',
+      new THREE.Float32BufferAttribute(trackColors, 3),
+    )
+    flow.add(
+      new THREE.LineSegments(
+        geometry,
+        new THREE.LineBasicMaterial({
+          vertexColors: true,
+          transparent: true,
+          opacity: 0.025,
+          depthWrite: false,
+        }),
+      ),
+    )
+    const tracers = this.volumeParticles(
+      new Array(phases.length * 3).fill(0),
+      new Array(phases.length * 3).fill(1),
+      new Array(phases.length).fill(0.065),
+      0.24,
+    )
+    tracers.geometry.setAttribute(
+      'aStart',
+      new THREE.Float32BufferAttribute(starts, 3),
+    )
+    tracers.geometry.setAttribute(
+      'aControl',
+      new THREE.Float32BufferAttribute(controls, 3),
+    )
+    tracers.geometry.setAttribute(
+      'aEnd',
+      new THREE.Float32BufferAttribute(ends, 3),
+    )
+    tracers.geometry.setAttribute(
+      'aPhase',
+      new THREE.Float32BufferAttribute(phases, 1),
+    )
+    tracers.material.uniforms.uTime = { value: this.visualTime }
+    tracers.material.uniforms.uCool = { value: cool }
+    tracers.material.uniforms.uWarm = { value: warm }
+    tracers.material.vertexShader = `
+      attribute vec3 aStart, aControl, aEnd;
+      attribute float aPhase;
+      uniform float uTime, uPixelRatio, uViewportHeight;
+      uniform vec3 uCool, uWarm;
+      varying vec3 vColor;
+      varying float vVisibility;
+      void main() {
+        float progress = fract(aPhase + uTime * 0.035);
+        vec3 point = mix(mix(aStart, aControl, progress), mix(aControl, aEnd, progress), progress);
+        vec4 viewPosition = modelViewMatrix * vec4(point, 1.0);
+        float size = 0.065 * length(modelMatrix[0].xyz) * projectionMatrix[1][1] * uViewportHeight * 0.5 / max(0.0001, -viewPosition.z);
+        vVisibility = pow(min(1.0, size / 1.5), 2.0) * smoothstep(0.0, 0.06, progress) * (1.0 - smoothstep(0.85, 1.0, progress));
+        vColor = mix(uCool, uWarm, progress);
+        gl_PointSize = clamp(size, 1.5, 8.0) * uPixelRatio;
+        gl_Position = projectionMatrix * viewPosition;
+      }
+    `
+    tracers.frustumCulled = false
+    this.shaders.push(tracers.material)
+    flow.add(tracers)
+    this.content.add(flow)
+    if (sizes.length) {
+      const groups = this.volumeParticles(positions, colors, sizes, 0.6)
+      groups.material.blending = THREE.NormalBlending
+      this.content.add(groups)
+    }
+    this.renderer.domElement.dataset.laniakeaRepresentation =
+      'catalog-anchored-filament-web'
+    this.renderer.domElement.dataset.laniakeaRadiusPc =
+      String(LANIAKEA_RADIUS_PC)
+    this.renderer.domElement.dataset.laniakeaFlowCurves = String(count)
+    this.renderer.domElement.dataset.structureMembers =
+      object.members!.join(',')
+  }
+
+  private buildExpansion() {
+    this.fitRadius = 10
+    const random = seededRandom(13800)
+    const positions: number[] = [],
+      centers: number[] = [],
+      colors: number[] = [],
+      sizes: number[] = []
+    const color = new THREE.Color()
+    for (let galaxy = 0; galaxy < 650; galaxy++) {
+      const center = new THREE.Vector3(
+        (random() - 0.5) * 13,
+        (random() - 0.5) * 9,
+        (random() - 0.5) * 11,
+      )
+      const tilt = new THREE.Euler(
+        random() * Math.PI,
+        random() * Math.PI,
+        random() * Math.PI,
+      )
+      color.set(galaxy % 3 === 0 ? '#e7c299' : '#9ec6da')
+      for (let index = 0; index < 24; index++) {
+        const angle = random() * Math.PI * 2
+        const radius = Math.sqrt(random()) * 0.07
+        const offset = new THREE.Vector3(
+          Math.cos(angle) * radius,
+          (random() - 0.5) * 0.014,
+          Math.sin(angle) * radius,
+        ).applyEuler(tilt)
+        positions.push(...offset.toArray())
+        centers.push(...center.toArray())
+        colors.push(color.r, color.g, color.b)
+        sizes.push(0.015 + random() * 0.04)
+      }
+    }
+    const galaxies = this.volumeParticles(positions, colors, sizes, 0.65)
+    galaxies.material.blending = THREE.NormalBlending
+    galaxies.geometry.setAttribute(
+      'aCenter',
+      new THREE.Float32BufferAttribute(centers, 3),
+    )
+    galaxies.material.uniforms.uExpansion = {
+      value: expansionScale(this.options.cosmicAgeGyr ?? 13.8),
+    }
+    galaxies.material.vertexShader = galaxies.material.vertexShader
+      .replace(
+        'attribute float aSize;',
+        'attribute float aSize; attribute vec3 aCenter; uniform float uExpansion;',
+      )
+      .replace(
+        'vec4(position, 1.0)',
+        'vec4(aCenter * uExpansion + position, 1.0)',
+      )
+    const beforeRender = galaxies.onBeforeRender
+    galaxies.onBeforeRender = (...args) => {
+      beforeRender.apply(galaxies, args)
+      const age = this.options.cosmicAgeGyr ?? 13.8
+      const scale = expansionScale(age)
+      galaxies.material.uniforms.uExpansion.value = scale
+      this.renderer.domElement.dataset.cosmicAgeGyr = age.toFixed(3)
+      this.renderer.domElement.dataset.expansionScale = scale.toFixed(6)
+    }
+    galaxies.frustumCulled = false
+    galaxies.name = 'comoving-galaxy-tracers'
+    this.content.add(galaxies)
+    this.renderer.domElement.dataset.cosmologyRepresentation =
+      'flat-lcdm-distance-expansion'
   }
 
   private buildUniverse(object: CelestialObject) {
+    if (object.visualization === 'dark-energy') {
+      this.buildExpansion()
+      return
+    }
+    if (object.id === 'laniakea') {
+      this.buildLaniakea(object)
+      return
+    }
     this.fitRadius = 8.5
-    const random = seededRandom(hashId(object.id))
-    const nodes = Array.from(
-      { length: 100 },
-      () =>
-        new THREE.Vector3(
-          (random() - 0.5) * 14,
-          (random() - 0.5) * 9,
-          (random() - 0.5) * 10,
-        ),
-    )
+    this.content.add(this.buildCosmicWeb(object))
+    const marker = new THREE.Object3D()
+    this.content.add(marker)
+    const id = object.id === 'universe' ? 'laniakea' : 'local-group'
+    this.addLabel(objectById.get(id)!.name, id, marker, 16)
+  }
+
+  private buildCosmicWeb(
+    object: CelestialObject,
+    anchors: THREE.Vector3[] = [],
+  ) {
+    const densityView = object.visualization === 'dark-matter'
+    const localWeb = object.id === 'laniakea'
+    const scale = localWeb ? 6.4 / 8.5 : 1
+    const random = seededRandom(hashId(densityView ? 'universe' : object.id))
+    const threadRandom = seededRandom(25022)
+    const voids = [
+      { center: new THREE.Vector3(-3, -1.2, 1.1), radius: 1.9 },
+      { center: new THREE.Vector3(1.7, 1.1, 1.6), radius: 1.75 },
+      { center: new THREE.Vector3(3.8, -0.8, -1.8), radius: 1.5 },
+      { center: new THREE.Vector3(-0.7, 2, -2.8), radius: 1.3 },
+      { center: new THREE.Vector3(-4.6, 1.2, -2.5), radius: 1.2 },
+      { center: new THREE.Vector3(0.1, -2.8, -1.3), radius: 1.15 },
+    ]
+    const nodes = anchors.map((anchor) => anchor.clone().divideScalar(scale))
+    for (
+      let attempt = 0;
+      nodes.length < (localWeb ? 170 : 110) && attempt < 4000;
+      attempt++
+    ) {
+      const point = new THREE.Vector3(
+        (random() - 0.5) * 14,
+        (random() - 0.5) * 9,
+        (random() - 0.5) * 11,
+      )
+      if (Math.hypot(point.x / 7, point.y / 4.5, point.z / 5.5) > 1) continue
+      if (
+        voids.some(
+          ({ center, radius }) => point.distanceTo(center) < radius + 0.25,
+        )
+      )
+        continue
+      if (nodes.some((node) => node.distanceToSquared(point) < 0.5)) continue
+      nodes.push(point)
+    }
     const positions: number[] = []
     const colors: number[] = []
     const sizes: number[] = []
+    const glowPositions: number[] = []
+    const glowColors: number[] = []
+    const glowSizes: number[] = []
+    const threads: number[] = []
+    const threadColors: number[] = []
+    const connections = new Set<string>()
+    const cool = new THREE.Color(localWeb ? '#628db9' : '#8cb9ce')
+    const teal = new THREE.Color('#79b7b5')
+    const warm = new THREE.Color(localWeb ? '#ffc16d' : '#efd0a1')
+    const color = new THREE.Color()
+    const closest = new THREE.Vector3()
+    const displacement = new THREE.Vector3()
+    const point = new THREE.Vector3()
+    const gaussian = () =>
+      Math.sqrt(-2 * Math.log(Math.max(random(), 1e-7))) *
+      Math.cos(random() * Math.PI * 2)
+    const insideVoid = (sample: THREE.Vector3) =>
+      voids.some(
+        ({ center, radius }) =>
+          sample.distanceToSquared(center) < radius * radius,
+      )
     nodes.forEach((node, nodeIndex) => {
       const nearest = nodes
         .map((neighbor, index) => ({
@@ -3310,49 +4040,232 @@ export class SpaceScene {
           index,
           distance: neighbor.distanceTo(node),
         }))
-        .filter(({ index }) => index > nodeIndex)
+        .filter(({ index }) => index !== nodeIndex)
         .sort((first, second) => first.distance - second.distance)
-        .slice(0, 3)
-      nearest.forEach(({ neighbor, distance }) => {
-        if (distance > 5) return
-        for (let index = 0; index < 170; index++) {
+        .slice(0, localWeb ? 4 : 3)
+      nearest.forEach(({ neighbor, index: neighborIndex, distance }) => {
+        const key = `${Math.min(nodeIndex, neighborIndex)}:${Math.max(nodeIndex, neighborIndex)}`
+        if (distance > 3.8 || connections.has(key)) return
+        connections.add(key)
+        const control = node
+          .clone()
+          .lerp(neighbor, 0.5)
+          .add(
+            new THREE.Vector3(
+              random() - 0.5,
+              random() - 0.5,
+              random() - 0.5,
+            ).multiplyScalar(distance * 0.35),
+          )
+        const segment = new THREE.Line3(node, neighbor)
+        for (const { center, radius } of voids) {
+          segment.closestPointToPoint(center, true, closest)
+          displacement.copy(closest).sub(center)
+          const clearance = displacement.length()
+          if (clearance < radius + 0.2) {
+            if (clearance < 1e-6) displacement.set(0, 1, 0)
+            control.add(
+              displacement
+                .normalize()
+                .multiplyScalar((radius + 0.2 - clearance) * 2.1),
+            )
+          }
+        }
+        const curve = new THREE.QuadraticBezierCurve3(node, control, neighbor)
+        if (localWeb) {
+          const direction = neighbor.clone().sub(node).normalize()
+          const side = direction.clone().cross(new THREE.Vector3(0, 1, 0))
+          if (side.lengthSq() < 1e-6) side.set(1, 0, 0)
+          side.normalize()
+          const normal = side.clone().cross(direction).normalize()
+          const previous = new THREE.Vector3()
+          const threadPoint = new THREE.Vector3()
+          for (
+            let strand = 0;
+            strand < (this.options.highQuality ? 6 : 3);
+            strand++
+          ) {
+            const phase = threadRandom() * Math.PI * 2
+            const spread = 0.025 + threadRandom() * 0.2
+            for (let step = 0; step <= 56; step++) {
+              const progress = step / 56
+              curve.getPoint(progress, threadPoint)
+              const envelope = Math.sin(progress * Math.PI)
+              threadPoint
+                .addScaledVector(
+                  side,
+                  envelope * spread * Math.sin(phase + progress * 9),
+                )
+                .addScaledVector(
+                  normal,
+                  envelope * spread * Math.cos(phase + progress * 7),
+                )
+              if (
+                step > 0 &&
+                !insideVoid(previous) &&
+                !insideVoid(threadPoint)
+              ) {
+                threads.push(...previous.toArray(), ...threadPoint.toArray())
+                color
+                  .copy(cool)
+                  .lerp(warm, Math.pow(Math.abs(progress - 0.5) * 2, 4) * 0.7)
+                threadColors.push(
+                  color.r,
+                  color.g,
+                  color.b,
+                  color.r,
+                  color.g,
+                  color.b,
+                )
+              }
+              previous.copy(threadPoint)
+            }
+          }
+        }
+        const samples = Math.ceil(
+          distance * (this.options.highQuality ? 150 : 85),
+        )
+        for (let index = 0; index < samples; index++) {
           const progress = random()
-          const point = node.clone().lerp(neighbor, progress)
-          const scatter = 0.08 + Math.sin(progress * Math.PI) * 0.18
+          curve.getPoint(progress, point)
+          const scatter =
+            (0.035 + Math.pow(Math.abs(progress - 0.5) * 2, 3) * 0.09) *
+            (index % 5 === 0 ? 2.5 : 1)
           point.add(
             new THREE.Vector3(
-              (random() - 0.5) * scatter * 3,
-              (random() - 0.5) * scatter * 3,
-              (random() - 0.5) * scatter * 3,
-            ),
+              gaussian(),
+              gaussian(),
+              gaussian(),
+            ).multiplyScalar(scatter),
           )
-          positions.push(point.x, point.y, point.z)
-          colors.push(
-            0.5 + random() * 0.5,
-            0.62 + random() * 0.3,
-            0.63 + random() * 0.3,
-          )
-          sizes.push(0.028 + random() * 0.08)
+          if (insideVoid(point)) continue
+          positions.push(...point.toArray())
+          color
+            .copy(nodeIndex % 3 === 0 ? teal : cool)
+            .lerp(warm, Math.pow(Math.abs(progress - 0.5) * 2, 5) * 0.45)
+            .multiplyScalar(0.45 + random() * 0.5)
+          colors.push(color.r, color.g, color.b)
+          sizes.push(0.018 + Math.pow(random(), 3) * 0.065)
+          if (index % 6 === 0) {
+            glowPositions.push(...point.toArray())
+            glowColors.push(color.r, color.g, color.b)
+            glowSizes.push(0.2 + random() * 0.18)
+          }
         }
       })
-      for (let index = 0; index < 180; index++) {
-        const spread = Math.pow(random(), 2) * 0.65
-        positions.push(
-          node.x + (random() - 0.5) * spread,
-          node.y + (random() - 0.5) * spread,
-          node.z + (random() - 0.5) * spread,
+      const richness = 0.35 + random() * 0.65
+      const members = Math.round(
+        (this.options.highQuality ? 300 : 170) * richness,
+      )
+      for (let index = 0; index < members; index++) {
+        const spread = 0.04 + Math.pow(random(), 1.8) * 0.28 * richness
+        point
+          .set(
+            gaussian() * spread,
+            gaussian() * spread * 0.8,
+            gaussian() * spread,
+          )
+          .add(node)
+        if (insideVoid(point)) continue
+        positions.push(...point.toArray())
+        color
+          .copy(warm)
+          .lerp(
+            cool,
+            localWeb
+              ? Math.min(0.4, spread * 1.3)
+              : Math.min(0.7, spread * 3),
+          )
+          .multiplyScalar(0.55 + random() * 0.45)
+        colors.push(color.r, color.g, color.b)
+        sizes.push(
+          localWeb
+            ? 0.034 + Math.pow(random(), 3) * 0.13
+            : 0.024 + Math.pow(random(), 3) * 0.075,
         )
-        colors.push(1, 0.88, 0.72)
-        sizes.push(0.035 + random() * 0.075)
+        if (index % 12 === 0) {
+          glowPositions.push(...point.toArray())
+          glowColors.push(color.r, color.g, color.b)
+          glowSizes.push(
+            localWeb ? 0.4 + richness * 0.35 : 0.28 + richness * 0.25,
+          )
+        }
       }
     })
-    const web = this.particles(positions, colors, sizes, 0.75)
-    this.content.add(web)
-    const marker = new THREE.Object3D()
-    marker.position.copy(nodes[50])
-    this.content.add(marker)
-    const id = object.id === 'universe' ? 'laniakea' : 'local-group'
-    this.addLabel(objectById.get(id)!.name, id, marker, 16)
+    const web = this.volumeParticles(positions, colors, sizes, 0.65)
+    web.material.blending = THREE.NormalBlending
+    web.name = 'schematic-cosmic-filaments'
+    const glow = this.volumeParticles(
+      glowPositions,
+      glowColors,
+      glowSizes,
+      0.045,
+    )
+    glow.material.blending = THREE.NormalBlending
+    glow.name = 'unresolved-filament-light'
+    if (densityView) {
+      const beforeRender = glow.onBeforeRender
+      glow.onBeforeRender = (...args) => {
+        beforeRender.apply(glow, args)
+        const gain = THREE.MathUtils.clamp(
+          this.options.densityGain ?? 1,
+          0.25,
+          2,
+        )
+        glow.material.uniforms.uOpacity.value = 0.12 * gain
+        web.material.uniforms.uOpacity.value = 0.65 * gain
+        this.renderer.domElement.dataset.densityGain = gain.toFixed(3)
+      }
+      this.renderer.domElement.dataset.cosmologyRepresentation =
+        'synthetic-dark-matter-density'
+    }
+    const field = new THREE.Group()
+    field.name = localWeb
+      ? 'laniakea-filament-density'
+      : 'cosmic-filament-density'
+    field.scale.setScalar(scale)
+    field.add(web, glow)
+    if (threads.length) {
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute(
+        'position',
+        new THREE.Float32BufferAttribute(threads, 3),
+      )
+      geometry.setAttribute(
+        'color',
+        new THREE.Float32BufferAttribute(threadColors, 3),
+      )
+      const strands = new THREE.LineSegments(
+        geometry,
+        new THREE.LineBasicMaterial({
+          vertexColors: true,
+          transparent: true,
+          opacity: 0.11,
+          depthWrite: false,
+        }),
+      )
+      strands.name = 'fine-filament-strands'
+      field.add(strands)
+    }
+    if (localWeb) {
+      this.renderer.domElement.dataset.laniakeaFilaments = String(
+        connections.size,
+      )
+      this.renderer.domElement.dataset.laniakeaThreads = String(
+        threads.length / 6,
+      )
+    } else {
+      this.renderer.domElement.dataset.cosmicWebRepresentation =
+        'curved-filaments-and-voids'
+      this.renderer.domElement.dataset.cosmicWebVoids = String(voids.length)
+      this.renderer.domElement.dataset.cosmicWebFilaments = String(
+        connections.size,
+      )
+      this.renderer.domElement.dataset.cosmicWebParticles = String(
+        sizes.length,
+      )
+    }
+    return field
   }
 
   private mapContextFor(object: CelestialObject): string {
@@ -3457,7 +4370,7 @@ export class SpaceScene {
           this.buildCluster(object)
           break
         case 'void':
-          this.buildVoid(object)
+          this.buildVoid()
           break
         case 'universe':
           this.buildUniverse(object)
@@ -3468,6 +4381,7 @@ export class SpaceScene {
       this.fitRadius = previousRadius
       this.buildingWorldVisual = false
     }
+    this.spectralAppearance.bind(parent, object)
     return parent
   }
 
@@ -3538,7 +4452,34 @@ export class SpaceScene {
     this.renderer.domElement.dataset.ready = 'true'
     this.renderer.domElement.dataset.mapContext = 'unified'
     this.updateRenderResolution()
+    this.updateSpectrum()
     return true
+  }
+
+  private updateSpectrum() {
+    const conceptual =
+      this.selected.visualization === 'dark-matter' ||
+      this.selected.visualization === 'dark-energy'
+    const band =
+      this.view === 'sky' || this.view === 'compare' || conceptual
+        ? 'visible'
+        : (this.options.spectrum ?? 'visible')
+    this.spectralAppearance.setBand(
+      band,
+      this.content,
+      this.options.radioExposure,
+    )
+    this.content.traverse((node) => {
+      if (node.userData.spectralBands)
+        node.visible = node.userData.spectralBands.includes(band)
+    })
+    this.starfield.visible =
+      band === 'visible' &&
+      this.view !== 'map' &&
+      this.view !== 'sky' &&
+      this.selected.kind !== 'void' &&
+      !conceptual
+    this.renderer.domElement.dataset.observationBand = band
   }
 
   setObject(object: CelestialObject, view: ViewMode, immediate = false) {
@@ -3578,6 +4519,7 @@ export class SpaceScene {
     this.billboards = []
     this.orbitPerspective = false
     this.skyLayer = null
+    this.earthMoonPair = null
     const displayObject = nextContext
       ? (objectById.get(nextContext) ?? object)
       : object
@@ -3632,7 +4574,7 @@ export class SpaceScene {
           this.buildCluster(displayObject)
           break
         case 'void':
-          this.buildVoid(displayObject)
+          this.buildVoid()
           this.starfield.visible = false
           break
         case 'universe':
@@ -3682,6 +4624,8 @@ export class SpaceScene {
     this.renderer.domElement.dataset.mapObjects = String(
       this.mapNodes.size + this.pointCount,
     )
+    if (view !== 'sky') this.spectralAppearance.bind(this.content, displayObject)
+    this.updateSpectrum()
     if (view === 'map') this.focusMapObject(object, immediate)
     else this.reset(immediate)
   }
@@ -3689,6 +4633,7 @@ export class SpaceScene {
   setTime(timestamp: number) {
     this.timestamp = timestamp
     this.continuousMap?.setTime(timestamp)
+    this.updateEarthMoon()
   }
 
   setOptions(options: SceneOptions) {
@@ -3700,8 +4645,10 @@ export class SpaceScene {
     const comparisonChanged =
       JSON.stringify(this.options.comparison) !==
       JSON.stringify(options.comparison)
-    const rulerChanged = Boolean(this.options.ruler) !== Boolean(options.ruler)
-    const galaxyStyleChanged = this.options.galaxyStyle !== options.galaxyStyle
+    const rulerChanged =
+      Boolean(this.options.ruler) !== Boolean(options.ruler)
+    const galaxyStyleChanged =
+      this.options.galaxyStyle !== options.galaxyStyle
     const rebuild =
       (this.options.compressed !== options.compressed ||
         this.options.catalogRevision !== options.catalogRevision) &&
@@ -3712,7 +4659,13 @@ export class SpaceScene {
     const uiChanged =
       Boolean(this.options.uiHidden) !== Boolean(options.uiHidden)
     const qualityChange = this.options.highQuality !== options.highQuality
+    const spectrumChanged =
+      this.options.spectrum !== options.spectrum ||
+      this.options.radioExposure !== options.radioExposure
+    const candidatesChanged =
+      this.options.showCandidates !== options.showCandidates
     this.options = options
+    if (spectrumChanged) this.updateSpectrum()
     if (galaxyStyleChanged)
       this.scene.traverse((node) => {
         if (node.userData.referenceOnly)
@@ -3730,7 +4683,8 @@ export class SpaceScene {
       options.navigation === 'pan' ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN
     this.controls.touches.ONE =
       options.navigation === 'pan' ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE
-    this.renderer.domElement.dataset.navigation = options.navigation ?? 'orbit'
+    this.renderer.domElement.dataset.navigation =
+      options.navigation ?? 'orbit'
     if (this.view === 'sky' && skyChanged) {
       this.setObject(this.selected, this.view, true)
       return
@@ -3743,6 +4697,13 @@ export class SpaceScene {
       this.continuousMap.setOptions(options)
       if (qualityChange || refit || uiChanged || rulerChanged)
         this.resize(uiChanged || rulerChanged)
+      return
+    }
+    if (
+      candidatesChanged &&
+      this.selected.visualization === 'proxima-system'
+    ) {
+      this.setObject(this.selected, this.view, true)
       return
     }
     if (qualityChange) {
@@ -4275,6 +5236,9 @@ export class SpaceScene {
       )
       const visible =
         this.options.labels &&
+        (!anchor.userData.surfaceRegion ||
+          anchor.getWorldPosition(new THREE.Vector3()).sub(anchor.parent!.getWorldPosition(new THREE.Vector3()))
+            .dot(this.camera.position.clone().sub(anchor.parent!.getWorldPosition(new THREE.Vector3()))) > 0) &&
         inBounds &&
         !collision &&
         this.screenVector.z < 1 &&

@@ -1,0 +1,82 @@
+export const atlasExperiences = [
+  {
+    id: 'proxima-system',
+    name: 'Proxima Centauri System',
+    view: 'object',
+    reference: 'proxima-centauri-system-3d-map',
+  },
+  {
+    id: 'exo:Proxima Cen b',
+    name: 'Proxima Centauri b',
+    view: 'orbit',
+    reference: 'proxima-centauri-b-3d-map',
+  },
+  {
+    id: 'exo:Proxima Cen d',
+    name: 'Proxima Centauri d',
+    view: 'orbit',
+    reference: 'proxima-centauri-d-3d-map',
+  },
+  {
+    id: 'laniakea',
+    name: 'Laniakea',
+    view: 'map',
+    reference: 'laniakea-supercluster-3d-map',
+  },
+  {
+    id: 'dark-matter',
+    name: 'Dark Matter',
+    view: 'object',
+    reference: 'dark-matter-map',
+  },
+  {
+    id: 'dark-energy',
+    name: 'Dark Energy',
+    view: 'object',
+    reference: 'dark-energy-map',
+  },
+  {
+    id: 'universe',
+    name: 'Cosmic Web',
+    view: 'map',
+    reference: 'cosmic-web-3d-interactive-map',
+  },
+  {
+    id: 'earth-moon',
+    name: 'Earth-Moon',
+    view: 'object',
+    reference: 'earth-moon-3d-scaled-view',
+  },
+  {
+    id: 'solar-system',
+    name: 'Solar System',
+    view: 'map',
+    reference: 'solar-system-3d-map',
+  },
+  { id: 'ton618', name: 'TON 618', view: 'object', reference: 'ton-618-map' },
+  {
+    id: 'ngc-6769-group',
+    name: 'NGC 6769 Group',
+    view: 'object',
+    reference: 'ngc-6769-group-map',
+  },
+  {
+    id: 'local-group',
+    name: 'Local Group',
+    view: 'object',
+    reference: 'local-group-map-3d-view',
+  },
+  {
+    id: 'bootes-void',
+    name: 'Bootes Void',
+    view: 'map',
+    reference: 'bootes-void-map',
+  },
+  {
+    id: 'milky-way',
+    name: 'Milky Way',
+    view: 'map',
+    reference: 'milky-way-galaxy-3d-map',
+  },
+  { id: 'mars', name: 'Mars', view: 'object', reference: 'mars-3d-map' },
+] as const

@@ -4,7 +4,7 @@ export function physicalRadius(object: CelestialObject): number | null {
   const radius = object.blackHole
     ? object.blackHole.massSolar * 2.95325
     : object.radiusKm
-  if (object.kind === 'rogue-planet' || object.kind === 'spacecraft')
+  if (object.illustrativeRadius || object.kind === 'rogue-planet' || object.kind === 'spacecraft')
     return null
   return radius && Number.isFinite(radius) && radius > 0 ? radius : null
 }
@@ -50,7 +50,7 @@ export function scientificConfidence(object: CelestialObject) {
                 : 'Reference position',
     size: object.blackHole
       ? 'Inferred horizon'
-      : object.kind === 'rogue-planet'
+      : object.kind === 'rogue-planet' || object.illustrativeRadius
         ? 'Illustrative radius'
         : physicalRadius(object)
           ? object.body || object.kind === 'moon'

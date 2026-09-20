@@ -3,6 +3,7 @@ import voyagerOne from './trajectories/voyager-1.json'
 import voyagerTwo from './trajectories/voyager-2.json'
 import newHorizons from './trajectories/new-horizons.json'
 import saturnMoons from './saturn-moons.json'
+import marsMoons from './mars-moons.json'
 import {
   getExtendedObject,
   hasExtendedObject,
@@ -19,6 +20,7 @@ export type ObjectKind =
   | 'asteroid'
   | 'moon'
   | 'star'
+  | 'white-dwarf'
   | 'black-hole'
   | 'nebula'
   | 'supernova'
@@ -84,13 +86,19 @@ export interface CelestialObject {
   color: string
   texture?: string
   parent?: string
+  members?: string[]
+  visualization?: 'earth-moon' | 'proxima-system' | 'dark-matter' | 'dark-energy'
+  planetaryHost?: string
+  illustrativeRadius?: boolean
   body?: Body
   radiusKm?: number
+  temperatureK?: number
   rotationHours?: number
   galacticPosition?: [number, number, number]
   elements?: OrbitalElements
   jovianMoon?: 'io' | 'europa' | 'ganymede' | 'callisto'
   saturnianMoon?: 'titan' | 'enceladus'
+  martianMoon?: 'phobos' | 'deimos'
   trajectory?: readonly (readonly [number, number, number, number])[]
   model?: {
     path: string
@@ -122,6 +130,7 @@ export const categories: { kind: ObjectKind; label: string }[] = [
   { kind: 'spacecraft', label: 'Spacecraft' },
   { kind: 'moon', label: 'Moons' },
   { kind: 'star', label: 'Stars' },
+  { kind: 'white-dwarf', label: 'White dwarfs' },
   { kind: 'system', label: 'Solar systems' },
   { kind: 'black-hole', label: 'Black holes' },
   { kind: 'nebula', label: 'Nebulae' },
@@ -442,6 +451,13 @@ export const catalog: CelestialObject[] = [
     color: '#ff956e',
     parent: 'milky-way',
     radiusKm: 107280,
+    temperatureK: 3042,
+    skyPosition: {
+      rightAscensionHours: 217.42894222160578 / 15,
+      declinationDegrees: -62.67949018907555,
+      distancePc: 1000 / 768.0665,
+      radiusPc: 107280 / 3.085677581491367e13,
+    },
     rotationHours: 1992,
     facts: [
       { label: 'Radius', value: '0.154 solar' },
@@ -985,6 +1001,12 @@ export const catalog: CelestialObject[] = [
     distance: '~54 million light-years',
     color: '#c6d9ef',
     parent: 'laniakea',
+    skyPosition: {
+      rightAscensionHours: 12.45,
+      declinationDegrees: 12.72,
+      distancePc: 16500000,
+      radiusPc: 2300000,
+    },
     facts: [
       { label: 'Members', value: '~1,300-2,000' },
       { label: 'Distance', value: '~54 million ly' },
@@ -1005,11 +1027,12 @@ export const catalog: CelestialObject[] = [
     classification: 'Supercluster / flow basin',
     subtitle: 'Immeasurable heaven.',
     description:
-      'A vast region defined by the flow of galaxies toward a common gravitational basin. It contains the Milky Way but is not a single gravitationally bound structure.',
+      'A vast region defined by the flow of galaxies toward a common gravitational basin. It contains the Milky Way but is not a single gravitationally bound structure. Named reference groups use approximate catalog positions within a roughly 160 Mpc span. Fine blue filaments, warm knots, sparse gaps and subdued flow traces are illustrative density cues, not a measured survey, reconstructed peculiar velocities or an enclosing boundary.',
     location: 'Cosmic web',
     distance: '~520 million ly across',
     color: '#b1ded9',
     parent: 'universe',
+    members: ['local-group', 'virgo', 'fornax-cluster', 'norma-cluster'],
     facts: [
       { label: 'Span', value: '~520 million ly' },
       { label: 'Galaxies', value: '~100,000' },
@@ -1226,6 +1249,54 @@ catalog.push(
   })),
 )
 
+catalog.push(
+  ...(['phobos', 'deimos'] as const).map((id): CelestialObject => ({
+    id,
+    name: id === 'phobos' ? 'Phobos' : 'Deimos',
+    kind: 'moon',
+    scene: 'planet',
+    martianMoon: id,
+    parent: 'mars',
+    classification: 'Martian moon / irregular rocky satellite',
+    subtitle:
+      id === 'phobos'
+        ? 'A close, rapidly orbiting moon.'
+        : 'The smaller outer moon of Mars.',
+    description: `${id === 'phobos' ? 'Phobos is an irregular, cratered moon whose large Stickney crater dominates one side.' : 'Deimos is a small irregular moon covered in fine regolith.'} The shape and procedural surface here are illustrative. Mars-centered JPL Horizons elements at 2026-09-16 TDB are propagated with a two-body Kepler model; precession, tides and perturbations are omitted.`,
+    location: 'Mars / Solar System',
+    distance: `~${Math.round(marsMoons[id].elements.semiMajorAxis * 149597870.7).toLocaleString('en-US')} km from Mars`,
+    color: id === 'phobos' ? '#aaa08e' : '#b6aa99',
+    radiusKm: id === 'phobos' ? 11.267 : 6.2,
+    rotationHours: marsMoons[id].periodDays * 24,
+    elements: marsMoons[id].elements,
+    coordinateSource: marsMoons[id].query,
+    facts: [
+      {
+        label: 'Approximate dimensions',
+        value: id === 'phobos' ? '27 x 22 x 18 km' : '15 x 12 x 11 km',
+      },
+      {
+        label: 'Orbital period',
+        value: `${(marsMoons[id].periodDays * 24).toFixed(2)} hours`,
+      },
+      { label: 'Surface', value: 'Illustrative regolith' },
+    ],
+    orbit: {
+      parent: 'Mars',
+      period: `${marsMoons[id].periodDays.toFixed(4)} days`,
+      periodDays: marsMoons[id].periodDays,
+      semiMajorAxis: marsMoons[id].elements.semiMajorAxis,
+      eccentricity: marsMoons[id].elements.eccentricity,
+      inclination: marsMoons[id].elements.inclination,
+      speed: 'Approximate Kepler motion',
+      model: 'kepler',
+      note: 'Mars-centered J2000 ecliptic osculating elements, not a full perturbed ephemeris. Body orientation and shape are illustrative.',
+    },
+    source: `https://science.nasa.gov/mars/moons/${id}/`,
+  })),
+)
+catalog.find((object) => object.id === 'mars')!.members = ['phobos', 'deimos']
+
 const voyagerTrajectories = { 'voyager-1': voyagerOne, 'voyager-2': voyagerTwo }
 catalog.push(
   ...(['voyager-1', 'voyager-2'] as const).map((id): CelestialObject => ({
@@ -1334,6 +1405,284 @@ catalog.push({
   source: 'https://science.nasa.gov/mission/new-horizons/',
 })
 
+catalog.push(
+  ...[
+    {
+      id: 'sirius-b',
+      name: 'Sirius B',
+      identifier: 'Sirius B',
+      ra: 101.28876746876543,
+      dec: -16.716867983351943,
+      parallax: 374.4896,
+      radius: 6000,
+      temperature: 25000,
+      color: '#d5e8ff',
+      parent: 'sirius',
+      type: 'DA white dwarf / cooling stellar remnant',
+      source: 'https://esahubble.org/news/heic0516/',
+    },
+    {
+      id: '40-eridani-b',
+      name: '40 Eridani B',
+      identifier: '40 Eri B',
+      ra: 63.84081549227875,
+      dec: -7.658112218552501,
+      parallax: 199.6911,
+      radius: 9100,
+      temperature: 16500,
+      color: '#e1eaff',
+      parent: 'milky-way',
+      type: 'DA white dwarf / multiple-star system',
+      source:
+        'https://simbad.cds.unistra.fr/simbad/sim-id?Ident=40%20Eri%20B',
+    },
+    {
+      id: 'van-maanen',
+      name: "Van Maanen's Star",
+      identifier: 'van Maanen 2',
+      ra: 12.291243072220414,
+      dec: 5.388609396929721,
+      parallax: 231.78,
+      radius: 8500,
+      temperature: 6200,
+      color: '#f4e6ca',
+      parent: 'milky-way',
+      type: 'DZ white dwarf / metal-polluted atmosphere',
+      source: 'https://science.nasa.gov/universe/stars/types/',
+    },
+  ].map((item): CelestialObject => ({
+    id: item.id,
+    name: item.name,
+    kind: 'white-dwarf',
+    scene: 'star',
+    classification: item.type,
+    subtitle: 'An Earth-size stellar remnant.',
+    description: `${item.name} is a compact stellar core cooling after its earlier evolution. It is not a small hydrogen-burning star. The reference sky position and parallax come from SIMBAD; proper motion and binary motion are not propagated. The radius and temperature are rounded, model-dependent reference estimates. The smooth surface and glow are illustrative, not resolved imagery.`,
+    location: 'Solar neighborhood / Milky Way',
+    distance: `${((1000 / item.parallax) * 3.26156).toFixed(2)} light-years`,
+    color: item.color,
+    parent: item.parent,
+    radiusKm: item.radius,
+    temperatureK: item.temperature,
+    skyPosition: {
+      rightAscensionHours: item.ra / 15,
+      declinationDegrees: item.dec,
+      distancePc: 1000 / item.parallax,
+      radiusPc: item.radius / 3.085677581491367e13,
+    },
+    coordinateSource: `https://simbad.cds.unistra.fr/simbad/sim-id?Ident=${encodeURIComponent(item.identifier)}`,
+    facts: [
+      {
+        label: 'Approximate radius',
+        value: `${item.radius.toLocaleString('en-US')} km`,
+      },
+      {
+        label: 'Approximate temperature',
+        value: `${item.temperature.toLocaleString('en-US')} K`,
+      },
+      { label: 'Energy source', value: 'Residual heat / cooling' },
+      {
+        label: 'Position',
+        value: 'Catalog reference; motion not propagated',
+      },
+    ],
+    orbit: noOrbit(
+      'No propagated binary or Galactic orbital solution is supplied. The catalog reference position is static.',
+      item.parent === 'sirius' ? 'Sirius A-B system' : 'Milky Way',
+    ),
+    source: item.source,
+  })),
+)
+
+const proximaReference = catalog.find((object) => object.id === 'proxima')!.skyPosition!
+const proximaMembers = [
+  {
+    name: 'Proxima Cen b',
+    display: 'Proxima Centauri b',
+    period: 11.18465,
+    axis: 0.04848,
+    radius: 1.02 * 6371,
+    phase: 25,
+    candidate: false,
+  },
+  {
+    name: 'Proxima Cen d',
+    display: 'Proxima Centauri d',
+    period: 5.12338,
+    axis: 0.02881,
+    radius: 0.692 * 6371,
+    phase: 210,
+    candidate: false,
+  },
+  {
+    name: 'Proxima Cen c',
+    display: 'Proxima Centauri c (candidate)',
+    period: 1900,
+    axis: 1.48,
+    radius: 18000,
+    phase: 100,
+    candidate: true,
+  },
+]
+catalog.push(
+  ...proximaMembers.map((item): CelestialObject => ({
+    id: item.candidate ? 'proxima-c' : `exo:${item.name}`,
+    name: item.display,
+    kind: 'exoplanet',
+    scene: 'planet',
+    classification: item.candidate
+      ? 'Disputed exoplanet candidate'
+      : 'Confirmed exoplanet / radial velocity',
+    subtitle: item.candidate
+      ? 'A disputed long-period signal.'
+      : 'A nearby world around a red dwarf.',
+    description: `${item.display} is shown around the catalog reference position of Proxima Centauri. ${item.candidate ? 'The proposed c signal is disputed; it is not a confirmed planet.' : 'Period and orbital-distance values follow the bundled NASA Exoplanet Archive snapshot.'} These non-transiting worlds have no measured surface maps or radii. Radius estimates, circular coplanar orientation, reference phase and appearance are illustrative. The orbital period is used by a Kepler model, not a navigation-grade ephemeris. A temperate orbit does not establish habitability.`,
+    location: 'Proxima Centauri system / Milky Way',
+    distance: '~4.25 light-years',
+    color: item.candidate
+      ? '#bba892'
+      : item.name.endsWith('b')
+        ? '#bfa181'
+        : '#a0aeb1',
+    parent: 'proxima-system',
+    planetaryHost: 'proxima',
+    radiusKm: item.radius,
+    illustrativeRadius: true,
+    skyPosition: {
+      ...proximaReference,
+      radiusPc: item.radius / 3.085677581491367e13,
+    },
+    elements: {
+      semiMajorAxis: item.axis,
+      eccentricity: 0,
+      inclination: 0,
+      ascendingNode: 0,
+      perihelionArgument: 0,
+      meanAnomaly: item.phase,
+      epoch: 2451545,
+      perihelionTime: 2451545,
+      perihelionDistance: item.axis,
+      meanMotionDegreesPerDay: 360 / item.period,
+    },
+    facts: [
+      { label: 'Orbital period', value: `${item.period} days` },
+      { label: 'Orbital distance', value: `${item.axis} AU` },
+      { label: 'Radius / surface', value: 'Unmeasured; illustrative' },
+      {
+        label: 'Status',
+        value: item.candidate
+          ? 'Candidate / disputed'
+          : 'Confirmed in NASA snapshot',
+      },
+    ],
+    orbit: {
+      parent: 'Proxima Centauri',
+      period: `${item.period} days`,
+      periodDays: item.period,
+      semiMajorAxis: item.axis,
+      eccentricity: 0,
+      speed: 'Approximate',
+      model: 'kepler',
+      note: 'Period-based circular Kepler illustration. Phase, inclination and ascending node are unconstrained display choices; positions are not observed planetary coordinates.',
+    },
+    source: item.candidate
+      ? 'https://www.eso.org/public/news/eso2202/'
+      : `https://exoplanetarchive.ipac.caltech.edu/overview/${encodeURIComponent(item.name)}`,
+  })),
+)
+catalog.push(
+  {
+    id: 'proxima-system',
+    name: 'Proxima Centauri System',
+    kind: 'system',
+    scene: 'system',
+    visualization: 'proxima-system',
+    classification: 'Nearby exoplanet system',
+    subtitle: 'Two confirmed worlds and a disputed candidate.',
+    description:
+      "The Proxima system shares its star's catalog reference position. Confirmed b and d use the bundled NASA periods and semi-major axes. Candidate c is optional and disputed. The common orbital plane, phases, radii and surfaces are illustrative. Close-up can compress distances; the map keeps AU-scale offsets around the host.",
+    location: 'Alpha Centauri region / Milky Way',
+    distance: '~4.25 light-years',
+    color: '#e4af87',
+    parent: 'milky-way',
+    members: [
+      'proxima',
+      'exo:Proxima Cen b',
+      'exo:Proxima Cen d',
+      'proxima-c',
+    ],
+    skyPosition: { ...proximaReference, radiusPc: 0.08 / 206264.80624709636 },
+    facts: [
+      { label: 'Confirmed planets', value: 'b, d' },
+      { label: 'Candidate', value: 'c / disputed' },
+      { label: 'Orbit orientation', value: 'Illustrative' },
+    ],
+    orbit: noOrbit(
+      'System overview; individual planet paths are approximate period-based Kepler illustrations.',
+      'Proxima Centauri',
+    ),
+    source: 'https://www.eso.org/public/news/eso2202/',
+  },
+  {
+    id: 'earth-moon',
+    name: 'Earth-Moon',
+    kind: 'system',
+    scene: 'system',
+    visualization: 'earth-moon',
+    classification: 'Earth-Moon true-scale pair',
+    subtitle: 'Physical radii and separation on one scale.',
+    description:
+      'Earth and the Moon use their physical reference radii and the calculated lunar distance at the selected date. The bodies stay small because the separation is about thirty Earth diameters. Lighting is illustrative. The frame is centered between the two bodies, not at their mass barycenter.',
+    location: 'Solar System',
+    distance: 'Date-dependent lunar distance',
+    color: '#bed9de',
+    parent: 'solar-system',
+    members: ['earth', 'moon'],
+    facts: [
+      { label: 'Earth radius', value: '6,371 km' },
+      { label: 'Moon radius', value: '1,737.4 km' },
+      { label: 'Scale', value: 'Radii and separation proportional' },
+    ],
+    orbit: noOrbit(
+      'The lunar position is computed by Astronomy Engine. This overview preserves physical size and distance ratios.',
+      'Earth-Moon system',
+    ),
+    source: 'https://science.nasa.gov/moon/facts/',
+  },
+  ...(['dark-matter', 'dark-energy'] as const).map((id): CelestialObject => ({
+    id,
+    name: id === 'dark-matter' ? 'Dark Matter' : 'Dark Energy',
+    kind: 'universe',
+    scene: 'universe',
+    visualization: id,
+    classification:
+      id === 'dark-matter'
+        ? 'Illustrative matter-density field'
+        : 'Illustrative cosmic expansion model',
+    subtitle:
+      id === 'dark-matter'
+        ? 'Density, not emitted light.'
+        : 'Expansion of unbound cosmic distances.',
+    description:
+      id === 'dark-matter'
+        ? 'Dark matter is not visible at any electromagnetic wavelength. This is a synthetic density illustration using the same filament layout as the cosmic-web overview, not a measured survey or an emission image. Brightness represents relative model density only.'
+        : 'A flat matter-plus-cosmological-constant expansion illustration, normalized at 13.8 billion years, with H0 = 67.4 km/s/Mpc and Omega Lambda = 0.685. Cosmic age is separate from the local UTC simulation clock. Only distances between unbound tracers expand; this is not an expansion of planets, bound galaxies or the measured catalog. Radiation, curvature and structure formation are omitted.',
+    location: 'Cosmological model / not a located object',
+    distance: 'No unique distance',
+    color: id === 'dark-matter' ? '#86c2bd' : '#d8b7cc',
+    parent: 'universe',
+    facts: [
+      { label: 'Basis', value: 'Conceptual model' },
+      { label: 'Measured survey', value: 'No' },
+      { label: 'Emitted light', value: 'Not represented' },
+    ],
+    orbit: noOrbit(
+      'Cosmological illustration, not a body with an orbit or unique physical position.',
+    ),
+    source: `https://science.nasa.gov/${id}/`,
+  })),
+)
+
 const deepSky: {
   id: string
   name: string
@@ -1353,6 +1702,7 @@ const deepSky: {
   blackHole?: CelestialObject['blackHole']
   morphology?: CelestialObject['morphology']
   model?: CelestialObject['model']
+  members?: string[]
   facts?: CelestialObject['facts']
   orbit?: OrbitData
 }[] = [
@@ -1716,7 +2066,7 @@ const deepSky: {
     color: '#a5c0cc',
     parent: 'universe',
     description:
-      'A vast region with far fewer galaxies than average, roughly 700 million light-years away in the direction of Bootes. It is not completely empty, not a black hole, and has no solid boundary. The approximate 330-million-light-year extent depends on how the void is defined. Sparse interior galaxies and surrounding filaments are schematic, not an identified survey of its members.',
+      'A vast region with far fewer galaxies than average, roughly 700 million light-years away in the direction of Bootes. It is not completely empty, not a black hole, and has no solid boundary or intrinsic glow. The approximate 330-million-light-year extent depends on how the void is defined. This app supplies a navigable reference region, not a member-galaxy survey: no luminous shell, center marker, or invented interior galaxies are drawn. Other catalog objects remain visible in the map.',
     facts: [
       { label: 'Approximate diameter', value: '~330 million light-years' },
       { label: 'Nature', value: 'Galaxy underdensity; not empty space' },
@@ -2077,6 +2427,100 @@ const deepSky: {
     source: 'https://science.nasa.gov/universe/galaxies/',
   },
   {
+    id: 'ngc-6769-group',
+    name: 'NGC 6769 Group',
+    kind: 'cluster',
+    scene: 'cluster',
+    type: 'Interacting galaxy triplet / NGC 6769-71',
+    ra: 289.638063 / 15,
+    dec: -60.514515,
+    distance: 58000000,
+    radius: 85000,
+    color: '#bad3e4',
+    parent: 'universe',
+    members: ['ngc-6769', 'ngc-6770', 'ngc-6771'],
+    description:
+      'Three interacting galaxies in Pavo, with blue star-forming arms and older warm central populations. The map uses SIMBAD sky directions at a shared approximate distance of 58 Mpc, following the ESO reference of about 190 million light-years. Their line-of-sight separations are unresolved. Disk orientations, tidal bridges and envelopes are illustrative, not an interaction simulation.',
+    facts: [
+      { label: 'Principal members', value: 'NGC 6769, 6770, 6771' },
+      { label: 'Depth', value: 'Shared distance; unresolved' },
+      { label: 'Center', value: 'Mean member sky direction' },
+    ],
+    source: 'https://www.eso.org/public/news/eso0413/',
+  },
+  {
+    id: 'ngc-6769',
+    name: 'NGC 6769',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Interacting spiral galaxy',
+    ra: 289.59417275224 / 15,
+    dec: -60.50089684394,
+    distance: 58000000,
+    radius: 21700,
+    color: '#b5d1ec',
+    parent: 'ngc-6769-group',
+    identifier: 'NGC 6769',
+    description:
+      'A spiral galaxy with tightly wound arms interacting with NGC 6770 and NGC 6771. Young stars brighten its disturbed arms. The adopted group distance is approximate, the radius is inferred from a catalog angular extent, and the displayed disk orientation and tidal material are illustrative.',
+    source: 'https://www.eso.org/public/news/eso0413/',
+  },
+  {
+    id: 'ngc-6770',
+    name: 'NGC 6770',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Interacting barred spiral galaxy',
+    ra: 289.65551666667 / 15,
+    dec: -60.49646111111,
+    distance: 58000000,
+    radius: 19700,
+    color: '#a9cce5',
+    parent: 'ngc-6769-group',
+    identifier: 'NGC 6770',
+    description:
+      'A disturbed barred spiral with two major arms and evidence of material stripped by its neighbors. One arm extends toward NGC 6769. Member depth is unresolved at the adopted group distance; arm geometry, orientation and tidal trails are illustrative.',
+    source: 'https://www.eso.org/public/news/eso0413/',
+  },
+  {
+    id: 'ngc-6771',
+    name: 'NGC 6771',
+    kind: 'galaxy',
+    scene: 'galaxy',
+    type: 'Interacting lenticular galaxy / boxy bulge',
+    ra: 289.66449979472 / 15,
+    dec: -60.54618746409,
+    distance: 58000000,
+    radius: 21700,
+    color: '#e7c69d',
+    parent: 'ngc-6769-group',
+    identifier: 'NGC 6771',
+    description:
+      'The fainter southern member of the triplet has a conspicuously boxy central bulge and a warped dust lane. Its older stars give it a warmer appearance. A common group distance is adopted rather than inferring depth from its different recession velocity. The displayed volume and orientation are illustrative.',
+    source: 'https://www.eso.org/public/news/eso0413/',
+  },
+  {
+    id: 'norma-cluster',
+    name: 'Norma Cluster',
+    kind: 'cluster',
+    scene: 'cluster',
+    type: 'Galaxy cluster / Abell 3627 / Great Attractor region',
+    ra: 243.59375 / 15,
+    dec: -60.86861111111,
+    distance: 70000000,
+    radius: 2500000,
+    color: '#ebc58d',
+    parent: 'laniakea',
+    identifier: 'ACO 3627',
+    description:
+      'A rich galaxy cluster in the Great Attractor region, partially obscured by the Milky Way. Its 70 Mpc reference distance is a rough low-redshift estimate using z = 0.01628 and H0 = 70 km/s/Mpc; peculiar velocities introduce substantial uncertainty. It is a reference anchor, not the unique center of all Laniakea flows. Internal galaxies and the 2.5 Mpc display extent are schematic.',
+    facts: [
+      { label: 'Redshift', value: '0.01628' },
+      { label: 'Distance basis', value: 'Approximate redshift distance' },
+    ],
+    source: 'https://simbad.cds.unistra.fr/simbad/sim-id?Ident=ACO%203627',
+  },
+  {
     id: 'fornax-cluster',
     name: 'Fornax Cluster',
     kind: 'cluster',
@@ -2139,6 +2583,7 @@ catalog.push(
     distance: `~${(item.distance * 3.26156).toLocaleString('en-US', { maximumSignificantDigits: 3 })} light-years`,
     color: item.color,
     parent: item.parent,
+    members: item.members,
     radiusKm:
       item.radiusKm ??
       (item.blackHole ? 2.95325 * item.blackHole.massSolar : undefined),
@@ -2249,16 +2694,20 @@ export function searchCatalog(
         object.body ||
         object.jovianMoon ||
         object.saturnianMoon ||
+        object.martianMoon ||
         object.trajectory,
-      ) || ['moon', 'solar-system'].includes(object.id)
+      ) || ['moon', 'solar-system', 'earth-moon'].includes(object.id)
     if (scope === 'nearby' && !nearby) return false
     if (scope === 'deep' && nearby) return false
     return `${object.name} ${object.classification} ${object.kind.replaceAll('-', ' ')} ${object.location}`
       .toLowerCase()
       .includes(normalized)
   })
+  const matchedIds = new Set(curated.map((object) => object.id))
   return [
     ...curated,
-    ...searchExtendedCatalog(normalized, scope, limit).objects,
+    ...searchExtendedCatalog(normalized, scope, limit).objects
+      .filter((object) => !matchedIds.has(object.id))
+      .map((object) => objectById.get(object.id) ?? object),
   ]
 }

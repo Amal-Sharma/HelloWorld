@@ -1,5 +1,50 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { atlasExperiences } from '../src/data/experiences'
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`radio exposure lifts faint emission without changing other bands at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize(viewport)
+    await page.goto('./?object=crab&view=object')
+    const canvas = page.locator('.universe-canvas canvas')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await page
+      .getByRole('button', { name: 'Pause simulation', exact: true })
+      .click()
+    const visible = await canvasPixels(page)
+    const band = page.getByRole('combobox', { name: 'Observation spectrum' })
+    await band.selectOption('radio')
+    const exposure = page.getByRole('slider', { name: 'Radio exposure' })
+    await expect(exposure).toHaveValue('3')
+    await exposure.fill('1')
+    const low = await canvasPixels(page)
+    await exposure.fill('3')
+    await expect
+      .poll(async () => (await canvasPixels(page)).bright)
+      .toBeGreaterThan(low.bright * 1.15)
+    const brighter = await canvasPixels(page)
+    expect(brighter.clipped / Math.max(1, brighter.bright)).toBeLessThan(0.12)
+    await page.screenshot({
+      path: testInfo.outputPath(`radio-exposure-${viewport.width}.png`),
+    })
+    await band.selectOption('visible')
+    await expect
+      .poll(async () => (await canvasPixels(page)).checksum)
+      .toBe(visible.checksum)
+    await expect(exposure).toHaveCount(0)
+    await page.goto('./?object=bootes-void&view=object')
+    await page
+      .getByRole('combobox', { name: 'Observation spectrum' })
+      .selectOption('radio')
+    await page.getByRole('slider', { name: 'Radio exposure' }).fill('8')
+    expect((await canvasPixels(page)).bright).toBe(0)
+  })
+}
 
 async function canvasPixels(page: Page) {
   await expect(page.locator('.universe-canvas canvas')).toHaveAttribute(
@@ -167,6 +212,7 @@ test('saved and shared viewpoints restore camera date and layers', async ({
   const target = (await canvas.getAttribute('data-world-target'))!
     .split(',')
     .map(Number)
+  await page.getByRole('combobox', { name: 'Observation spectrum' }).selectOption('infrared')
   await page
     .getByRole('button', { name: 'Exploration tools', exact: true })
     .click()
@@ -182,6 +228,7 @@ test('saved and shared viewpoints restore camera date and layers', async ({
   await page.goto('about:blank')
   await page.goto(link)
   await expect(canvas).toHaveAttribute('data-viewpoint-applied', 'Earth test')
+  await expect(canvas).toHaveAttribute('data-observation-band', 'infrared')
   await expect(canvas).toHaveAttribute('data-catalog-ready', 'true')
   await expect(
     page.getByRole('textbox', { name: 'Simulation date' }),
@@ -253,6 +300,7 @@ test('shared science views preserve compared objects and observer location', asy
     await page
       .getByRole('button', { name: 'Exploration tools', exact: true })
       .click()
+    await tools.getByRole('tab', { name: 'Views', exact: true }).click()
     await tools.getByRole('button', { name: 'Share view', exact: true }).click()
     const link = await tools.getByLabel('Share link').inputValue()
     await page.goto('about:blank')
@@ -809,7 +857,6 @@ for (const viewport of [
     'pillars-of-creation',
     'butterfly-nebula',
     'sn1006',
-    'bootes-void',
   ]) {
     test(`new deep-sky visuals: ${id} at ${viewport.width}px retain detail and 3D interaction`, async ({
       page,
@@ -833,15 +880,6 @@ for (const viewport of [
       }
       if (id === 'gaia-bh1')
         await expect(canvas).toHaveAttribute('data-black-hole-state', 'dormant')
-      if (id === 'bootes-void') {
-        await expect(canvas).toHaveAttribute(
-          'data-void-representation',
-          'sparse-galaxies-no-surface',
-        )
-        await expect(
-          page.getByRole('tab', { name: 'Orbit', exact: true }),
-        ).toBeDisabled()
-      }
       await page
         .getByRole('button', { name: 'Pause simulation', exact: true })
         .click()
@@ -885,6 +923,416 @@ for (const viewport of [
       expect(errors).toEqual([])
     })
   }
+}
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`void emits no light or shell and remains traversable at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize(viewport)
+    await page.goto('./?object=bootes-void&view=object')
+    const canvas = page.locator('.universe-canvas canvas')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await expect(canvas).toHaveAttribute(
+      'data-void-representation',
+      'non-emitting-reference-region',
+    )
+    await expect(canvas).toHaveAttribute('data-void-interior-markers', '0')
+    await expect(canvas).toHaveAttribute('data-void-surface-layers', '0')
+    expect((await canvasPixels(page)).bright).toBe(0)
+    await page.screenshot({
+      path: testInfo.outputPath(`non-emitting-void-${viewport.width}.png`),
+    })
+    await page.getByRole('tab', { name: '3D map', exact: true }).click()
+    await expect(canvas).toHaveAttribute('data-following-id', 'bootes-void')
+    for (let index = 0; index < 9; index++)
+      await page.getByRole('button', { name: 'Zoom in', exact: true }).click()
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    expect(
+      Number(await canvas.getAttribute('data-world-distance-pc')),
+    ).toBeLessThan(50000000)
+    await expect(canvas).toHaveAttribute('data-following-id', 'bootes-void')
+    await page.screenshot({
+      path: testInfo.outputPath(`inside-void-${viewport.width}.png`),
+    })
+  })
+}
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`white dwarfs render compact surfaces and map positions at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(120000)
+    await page.setViewportSize(viewport)
+    for (const id of ['sirius-b', '40-eridani-b', 'van-maanen']) {
+      await page.goto(`./?object=${id}&view=object`)
+      const canvas = page.locator('.universe-canvas canvas')
+      await expect(canvas).toHaveAttribute('data-flying', 'false')
+      await expect(canvas).toHaveAttribute(
+        'data-white-dwarf-appearance',
+        'compact-cooling-photosphere',
+      )
+      expect((await canvasPixels(page)).bright).toBeGreaterThan(100)
+      await page.screenshot({
+        path: testInfo.outputPath(`${id}-${viewport.width}.png`),
+      })
+      await page.getByRole('tab', { name: '3D map', exact: true }).click()
+      await expect(canvas).toHaveAttribute('data-following-id', id)
+      await expect(canvas).toHaveAttribute('data-flying', 'false')
+      await expect(canvas).toHaveAttribute(
+        'data-active-model-ids',
+        new RegExp(`(^|,)${id}(,|$)`),
+      )
+      expect((await canvasPixels(page)).bright).toBeGreaterThan(25)
+    }
+  })
+}
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`spectrum modes change emission without moving the camera at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(150000)
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(message.text())
+    })
+    await page.setViewportSize(viewport)
+    await page.goto('./?object=earth&view=object')
+    const canvas = page.locator('.universe-canvas canvas')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await page
+      .getByRole('button', { name: 'Pause simulation', exact: true })
+      .click()
+    const baseline = await canvasPixels(page)
+    const generation = await canvas.getAttribute('data-map-generation')
+    const camera = await canvas.getAttribute('data-camera-distance')
+    const select = page.getByRole('combobox', {
+      name: 'Observation spectrum',
+    })
+    for (const band of [
+      'infrared',
+      'ultraviolet',
+      'radio',
+      'xray',
+      'gamma',
+    ]) {
+      await select.selectOption(band)
+      await expect(canvas).toHaveAttribute('data-observation-band', band)
+      await expect(canvas).toHaveAttribute('data-map-generation', generation!)
+      await expect(canvas).toHaveAttribute('data-camera-distance', camera!)
+      const pixels = await canvasPixels(page)
+      expect(pixels.checksum).not.toBe(baseline.checksum)
+      if (band === 'infrared') expect(pixels.bright).toBeGreaterThan(100)
+      if (band === 'gamma' || band === 'xray') expect(pixels.bright).toBe(0)
+    }
+    await select.selectOption('visible')
+    await expect
+      .poll(async () => (await canvasPixels(page)).checksum)
+      .toBe(baseline.checksum)
+    await page.goto('./?object=crab&view=object')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await select.selectOption('xray')
+    expect((await canvasPixels(page)).bright).toBeGreaterThan(25)
+    await page.screenshot({
+      path: testInfo.outputPath(`crab-xray-${viewport.width}.png`),
+    })
+    await page.goto('./?object=virgo&view=object')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await select.selectOption('xray')
+    expect((await canvasPixels(page)).bright).toBeGreaterThan(25)
+    await page.screenshot({
+      path: testInfo.outputPath(`virgo-xray-${viewport.width}.png`),
+    })
+    await page.goto('./?object=pillars-of-creation&view=object')
+    await select.selectOption('gamma')
+    await expect(canvas).toHaveAttribute('data-model-state', 'ready')
+    expect((await canvasPixels(page)).bright).toBe(0)
+    await page.goto('./?object=bootes-void&view=object')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    for (const band of ['visible', 'infrared', 'xray', 'gamma']) {
+      await select.selectOption(band)
+      expect((await canvasPixels(page)).bright).toBe(0)
+    }
+    expect(errors).toEqual([])
+  })
+}
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`atlas planetary views use their own hosts and physical pair scale at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(120000)
+    await page.setViewportSize(viewport)
+    await page.goto('./?object=earth')
+    await page
+      .getByRole('button', { name: 'Exploration tools', exact: true })
+      .click()
+    await page.getByRole('tab', { name: 'Atlas', exact: true }).click()
+    const atlas = page.getByRole('navigation', { name: 'Atlas destinations' })
+    await expect(atlas.getByRole('button')).toHaveCount(15)
+    await atlas
+      .getByRole('button', { name: 'Proxima Centauri System', exact: true })
+      .click()
+    const canvas = page.locator('.universe-canvas canvas')
+    await expect(canvas).toHaveAttribute(
+      'data-system-representation',
+      'proxima-host-relative-kepler-illustration',
+    )
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await expect(canvas).not.toHaveAttribute(
+      'data-system-members',
+      /proxima-c/,
+    )
+    await page
+      .getByRole('checkbox', { name: 'Include candidate Proxima c' })
+      .check()
+    await expect(canvas).toHaveAttribute('data-system-members', /proxima-c/)
+    const controlBounds = (await page
+      .locator('.model-control')
+      .boundingBox())!
+    const tools = page.getByRole('region', { name: 'Exploration tools' })
+    await expect(tools).toBeVisible()
+    if (viewport.width < 760) {
+      const panelBounds = (await tools.boundingBox())!
+      expect(controlBounds.y + controlBounds.height).toBeLessThan(panelBounds.y)
+      await tools.getByRole('button', { name: 'Close exploration tools', exact: true }).click()
+    }
+    const headingBounds = (await page
+      .locator('.scene-heading')
+      .boundingBox())!
+    expect(controlBounds.y + controlBounds.height).toBeLessThanOrEqual(
+      headingBounds.y,
+    )
+    expect((await canvasPixels(page)).bright).toBeGreaterThan(
+      viewport.width > 760 ? 50 : 25,
+    )
+    await page.screenshot({
+      path: testInfo.outputPath(`proxima-system-${viewport.width}.png`),
+    })
+    await page.goto('./?object=exo%3AProxima%20Cen%20b&view=orbit')
+    await expect(canvas).toHaveAttribute(
+      'data-system-representation',
+      'proxima-host-relative-kepler-illustration',
+    )
+    await expect(canvas).toHaveAttribute(
+      'data-system-members',
+      'proxima,exo:Proxima Cen b',
+    )
+    await page.getByRole('tab', { name: '3D map', exact: true }).click()
+    await expect(canvas).toHaveAttribute(
+      'data-following-id',
+      'exo:Proxima Cen b',
+    )
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await expect(canvas).toHaveAttribute(
+      'data-host-orbit-ids',
+      /exo:Proxima Cen b/,
+    )
+    await page.goto('./?object=earth-moon&view=object')
+    await expect(canvas).toHaveAttribute(
+      'data-system-representation',
+      'earth-moon-physical-scale',
+    )
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    const radii = JSON.parse(
+      (await canvas.getAttribute('data-earth-moon-radii'))!,
+    )
+    expect(radii[0] / radii[1]).toBeCloseTo(6371 / 1737.4, 5)
+    const distance = Number(
+      await canvas.getAttribute('data-earth-moon-distance-km'),
+    )
+    expect(distance).toBeGreaterThan(350000)
+    expect(distance).toBeLessThan(410000)
+    await page.screenshot({
+      path: testInfo.outputPath(`earth-moon-${viewport.width}.png`),
+    })
+    await page
+      .getByRole('button', { name: 'Step forward one day', exact: true })
+      .click()
+    await expect
+      .poll(async () =>
+        Number(await canvas.getAttribute('data-earth-moon-distance-km')),
+      )
+      .not.toBe(distance)
+  })
+}
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`cosmology diagrams separate density and expansion from emitted light at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(120000)
+    await page.setViewportSize(viewport)
+    const canvas = page.locator('.universe-canvas canvas')
+    await page.goto('./?object=dark-matter&view=object')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await expect(canvas).toHaveAttribute(
+      'data-cosmology-representation',
+      'synthetic-dark-matter-density',
+    )
+    await expect(
+      page.getByRole('combobox', { name: 'Observation spectrum' }),
+    ).toBeDisabled()
+    const original = await canvasPixels(page)
+    expect(original.bright).toBeGreaterThan(25)
+    await page.getByRole('slider', { name: 'Density contrast' }).fill('0.25')
+    await expect(canvas).toHaveAttribute('data-density-gain', '0.250')
+    expect((await canvasPixels(page)).checksum).not.toBe(original.checksum)
+    await page.screenshot({
+      path: testInfo.outputPath(`dark-matter-${viewport.width}.png`),
+    })
+    await page.goto('./?object=dark-energy&view=object')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await expect(canvas).toHaveAttribute(
+      'data-cosmology-representation',
+      'flat-lcdm-distance-expansion',
+    )
+    await page
+      .getByRole('slider', { name: 'Cosmic age in billion years' })
+      .fill('13.8')
+    await expect(canvas).toHaveAttribute('data-expansion-scale', '1.000000')
+    const baseline = await canvasPixels(page)
+    expect(baseline.bright).toBeGreaterThan(25)
+    await page
+      .getByRole('slider', { name: 'Cosmic age in billion years' })
+      .fill('20')
+    await expect
+      .poll(async () =>
+        Number(await canvas.getAttribute('data-expansion-scale')),
+      )
+      .toBeGreaterThan(1)
+    expect((await canvasPixels(page)).checksum).not.toBe(baseline.checksum)
+    await page.screenshot({
+      path: testInfo.outputPath(`dark-energy-${viewport.width}.png`),
+    })
+    await page
+      .getByRole('button', { name: 'Play simulation', exact: true })
+      .click()
+    await expect
+      .poll(async () =>
+        Number(await canvas.getAttribute('data-cosmic-age-gyr')),
+      )
+      .toBeGreaterThan(20.1)
+    await page
+      .getByRole('button', { name: 'Pause simulation', exact: true })
+      .click()
+    const age = await canvas.getAttribute('data-cosmic-age-gyr')
+    await canvasPixels(page)
+    await expect(canvas).toHaveAttribute('data-cosmic-age-gyr', age!)
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true)
+  })
+}
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`Mars regions and both moons are selectable at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(120000)
+    await page.setViewportSize(viewport)
+    await page.goto('./?object=mars&view=object')
+    const canvas = page.locator('.universe-canvas canvas')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    for (const region of ['olympus', 'jezero']) {
+      await page
+        .getByRole('combobox', { name: 'Mars surface region' })
+        .selectOption(region)
+      await expect(canvas).toHaveAttribute('data-mars-region', region)
+      await expect(canvas).toHaveAttribute('data-flying', 'false')
+      expect((await canvasPixels(page)).bright).toBeGreaterThan(50)
+      await page.screenshot({
+        path: testInfo.outputPath(`mars-${region}-${viewport.width}.png`),
+      })
+    }
+    for (const id of ['phobos', 'deimos']) {
+      await page.goto(`./?object=${id}&view=object`)
+      await expect(canvas).toHaveAttribute('data-flying', 'false')
+      await expect(canvas).toHaveAttribute(
+        'data-moon-morphology',
+        'irregular-regolith-illustration',
+      )
+      expect((await canvasPixels(page)).bright).toBeGreaterThan(50)
+      await page.screenshot({
+        path: testInfo.outputPath(`${id}-${viewport.width}.png`),
+      })
+      await page.getByRole('tab', { name: 'Orbit', exact: true }).click()
+      await expect(canvas).toHaveAttribute('data-flying', 'false')
+      expect((await canvasPixels(page)).bright).toBeGreaterThan(25)
+    }
+  })
+}
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`Atlas opens every mapped reference experience at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(240000)
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(message.text())
+    })
+    await page.setViewportSize(viewport)
+    await page.goto('./?object=earth')
+    const canvas = page.locator('.universe-canvas canvas')
+    await expect(canvas).toHaveAttribute('data-catalog-ready', 'true')
+    await expect(page.locator('.catalog-footer')).toContainText(
+      '135,171 catalog entries',
+    )
+    for (const item of atlasExperiences) {
+      await page
+        .getByRole('button', { name: 'Exploration tools', exact: true })
+        .click()
+      await page.getByRole('tab', { name: 'Atlas', exact: true }).click()
+      await page
+        .getByRole('navigation', { name: 'Atlas destinations' })
+        .getByRole('button', { name: item.name, exact: true })
+        .click()
+      await expect(canvas).toHaveAttribute('data-scene', item.id)
+      await expect(canvas).toHaveAttribute('data-view', item.view)
+      await expect(canvas).toHaveAttribute('data-flying', 'false')
+      if (item.id !== 'bootes-void')
+        expect((await canvasPixels(page)).bright, item.name).toBeGreaterThan(
+          10,
+        )
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+        item.name,
+      ).toBe(true)
+    }
+    await page.screenshot({
+      path: testInfo.outputPath(`atlas-mars-${viewport.width}.png`),
+    })
+    expect(errors).toEqual([])
+  })
 }
 
 test('expanded families share one navigable world and the void has no collision wall', async ({
@@ -933,7 +1381,8 @@ test('expanded families share one navigable world and the void has no collision 
       await expect(canvas).toHaveAttribute('data-model-object', id)
       await expect(canvas).toHaveAttribute('data-model-state', 'ready')
     }
-    expect((await canvasPixels(page)).bright, name).toBeGreaterThan(50)
+    if (id !== 'bootes-void')
+      expect((await canvasPixels(page)).bright, name).toBeGreaterThan(50)
   }
   await page.getByRole('textbox', { name: 'Search celestial objects' }).fill('')
   for (let index = 0; index < 9; index++)
@@ -1011,6 +1460,237 @@ test('NASA assets recover from failures and late loads cannot replace a newer sc
     resumeModel()
   }
 })
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`Tools keeps the selected tab when changing Atlas destinations at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize(viewport)
+    await page.goto('./?object=earth')
+    const toolsButton = page.getByRole('button', {
+      name: 'Exploration tools',
+      exact: true,
+    })
+    await toolsButton.click()
+    const tools = page.getByRole('region', { name: 'Exploration tools' })
+    await tools.getByRole('tab', { name: 'Atlas', exact: true }).click()
+    for (const [name, id] of [
+      ['Mars', 'mars'],
+      ['Laniakea', 'laniakea'],
+      ['Milky Way', 'milky-way'],
+    ]) {
+      await tools
+        .getByRole('navigation', { name: 'Atlas destinations' })
+        .getByRole('button', { name, exact: true })
+        .click()
+      await expect(page.locator('.universe-canvas canvas')).toHaveAttribute(
+        'data-scene',
+        id,
+      )
+      await expect(tools).toBeVisible()
+      await expect(
+        tools.getByRole('tab', { name: 'Atlas', exact: true }),
+      ).toHaveAttribute('aria-selected', 'true')
+      await expect(toolsButton).toHaveAttribute('aria-pressed', 'true')
+      await expect(
+        page.getByRole('button', { name: 'Explore', exact: true }),
+      ).not.toHaveClass(/selected/)
+    }
+    await tools.getByRole('tab', { name: 'Scale', exact: true }).click()
+    await expect(
+      tools.getByRole('tab', { name: 'Scale', exact: true }),
+    ).toHaveAttribute('aria-selected', 'true')
+    const panelBounds = (await tools.boundingBox())!
+    const cameraBounds = (await page
+      .getByRole('toolbar', { name: 'Camera controls' })
+      .boundingBox())!
+    expect(
+      cameraBounds.x + cameraBounds.width <= panelBounds.x ||
+        panelBounds.x + panelBounds.width <= cameraBounds.x,
+    ).toBe(true)
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true)
+    await page.screenshot({
+      path: testInfo.outputPath(`persistent-tools-${viewport.width}.png`),
+    })
+    await tools
+      .getByRole('button', { name: 'Close exploration tools', exact: true })
+      .click()
+    await expect(tools).toHaveCount(0)
+    await expect(page.locator('.universe-canvas canvas')).toHaveAttribute(
+      'data-scene',
+      'milky-way',
+    )
+    await toolsButton.click()
+    await expect(
+      tools.getByRole('tab', { name: 'Scale', exact: true }),
+    ).toHaveAttribute('aria-selected', 'true')
+    await toolsButton.click()
+    await expect(tools).toBeVisible()
+    await page.getByRole('button', { name: 'Explore', exact: true }).click()
+    await expect(tools).toHaveCount(0)
+  })
+}
+
+test('unselected Laniakea appears between local groups and the observable horizon', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(120000)
+  await page.goto('./?object=solar-system')
+  const canvas = page.locator('.universe-canvas canvas')
+  await expect(canvas).toHaveAttribute('data-catalog-ready', 'true')
+  await expect(canvas).toHaveAttribute('data-flying', 'false')
+  const generation = await canvas.getAttribute('data-map-generation')
+  const scale = page.getByRole('slider', { name: 'Map scale', exact: true })
+  const setScale = async (value: number) =>
+    scale.evaluate((element, next) => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(element, next)
+      element.dispatchEvent(new Event('input', { bubbles: true }))
+    }, value)
+  for (const [logDistance, laniakea, universe] of [
+    [6, false, false],
+    [7.5, true, false],
+    [8.3, true, false],
+    [9.5, true, true],
+  ] as const) {
+    await setScale(logDistance)
+    await expect
+      .poll(async () =>
+        Math.log10(
+          Number(await canvas.getAttribute('data-world-distance-pc')),
+        ),
+      )
+      .toBeCloseTo(logDistance, 3)
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    for (const [id, visible] of [
+      ['laniakea', laniakea],
+      ['universe', universe],
+    ] as const) {
+      if (visible)
+        await expect(canvas).toHaveAttribute(
+          'data-active-model-ids',
+          new RegExp(`(^|,)${id}(,|$)`),
+        )
+      else
+        await expect(canvas).not.toHaveAttribute(
+          'data-active-model-ids',
+          new RegExp(`(^|,)${id}(,|$)`),
+        )
+    }
+    expect(
+      Number(await canvas.getAttribute('data-world-distance-pc')),
+    ).toBeCloseTo(10 ** logDistance, -3)
+    await expect(canvas).toHaveAttribute('data-scene', 'solar-system')
+    await expect(canvas).toHaveAttribute('data-map-generation', generation!)
+    if (logDistance === 7.5)
+      await expect(page.locator('.continuous-scale > span')).toHaveText(
+        'Supercluster Neighborhood',
+      )
+    await page.screenshot({
+      path: testInfo.outputPath(`continuous-scale-${logDistance}.png`),
+    })
+  }
+  await setScale(7.5)
+  await expect
+    .poll(async () =>
+      Math.log10(Number(await canvas.getAttribute('data-world-distance-pc'))),
+    )
+    .toBeCloseTo(7.5, 3)
+  await expect(canvas).toHaveAttribute('data-flying', 'false')
+  const before = Number(await canvas.getAttribute('data-world-distance-pc'))
+  await canvas.dispatchEvent('wheel', {
+    deltaY: 100000,
+    clientX: 720,
+    clientY: 500,
+    bubbles: true,
+  })
+  await expect
+    .poll(async () =>
+      Number(await canvas.getAttribute('data-world-distance-pc')),
+    )
+    .toBeGreaterThan(before * 1.05)
+  await expect(canvas).toHaveAttribute('data-flying', 'false')
+  expect(
+    Number(await canvas.getAttribute('data-world-distance-pc')),
+  ).toBeGreaterThan(before)
+  expect(
+    Number(await canvas.getAttribute('data-world-distance-pc')),
+  ).toBeLessThan(before * 1.4)
+  await expect(canvas).not.toHaveAttribute(
+    'data-active-model-ids',
+    /(^|,)universe(,|$)/,
+  )
+})
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`Laniakea filaments keep dark gaps and warm knots at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(120000)
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(message.text())
+    })
+    await page.setViewportSize(viewport)
+    await page.goto('./?object=laniakea&view=object')
+    const canvas = page.locator('.universe-canvas canvas')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await expect(canvas).toHaveAttribute(
+      'data-laniakea-representation',
+      'catalog-anchored-filament-web',
+    )
+    await expect(canvas).toHaveAttribute(
+      'data-laniakea-radius-pc',
+      '80000000',
+    )
+    expect(
+      Number(await canvas.getAttribute('data-laniakea-filaments')),
+    ).toBeGreaterThan(200)
+    expect(
+      Number(await canvas.getAttribute('data-laniakea-threads')),
+    ).toBeGreaterThan(10000)
+    await page
+      .getByRole('button', { name: 'Pause simulation', exact: true })
+      .click()
+    await page.getByRole('button', { name: 'Hide UI', exact: true }).click()
+    const pixels = await canvasPixels(page)
+    expect(pixels.bright).toBeGreaterThan(viewport.width > 760 ? 1000 : 150)
+    expect(pixels.warmStars).toBeGreaterThan(viewport.width > 760 ? 100 : 20)
+    expect(pixels.coolStars).toBeGreaterThan(viewport.width > 760 ? 100 : 20)
+    expect(pixels.clipped / Math.max(1, pixels.bright)).toBeLessThan(0.08)
+    await page.screenshot({
+      path: testInfo.outputPath(`laniakea-filaments-${viewport.width}.png`),
+    })
+    await page.mouse.move(viewport.width * 0.45, viewport.height * 0.45)
+    await page.mouse.down()
+    await page.mouse.move(viewport.width * 0.63, viewport.height * 0.54, {
+      steps: 6,
+    })
+    await page.mouse.up()
+    await expect
+      .poll(async () => (await canvasPixels(page)).checksum)
+      .not.toBe(pixels.checksum)
+    await page.screenshot({
+      path: testInfo.outputPath(
+        `laniakea-filaments-${viewport.width}-rotated.png`,
+      ),
+    })
+    expect(errors).toEqual([])
+  })
+}
 
 test('NASA Voyager models and open trajectories share the metric map', async ({
   page,
@@ -1654,20 +2334,28 @@ test('invalid catalog rows are rejected before any map data is published', async
 }) => {
   const errors: string[] = []
   page.on('pageerror', (error) => errors.push(error.message))
-  await page.route('**/data/stars.json', (route) =>
-    route.fulfill({
+  let releaseCatalog: () => void = () => undefined
+  const catalogGate = new Promise<void>((resolve) => {
+    releaseCatalog = resolve
+  })
+  await page.route('**/data/stars.json', async (route) => {
+    await catalogGate
+    await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({ rows: [['invalid', null]] }),
-    }),
-  )
-  await page.goto('/')
+    })
+  })
+  await page.goto('/', { waitUntil: 'domcontentloaded' })
   const canvas = page.locator('.universe-canvas canvas')
+  await expect(canvas).toHaveAttribute('data-map-context', 'unified')
+  const curatedCount = await canvas.getAttribute('data-map-objects')
+  expect(Number(curatedCount)).toBeGreaterThan(0)
+  releaseCatalog()
   await expect(
     page.getByRole('button', { name: 'Retry catalog loading', exact: true }),
   ).toBeVisible()
-  expect(Number(await canvas.getAttribute('data-map-objects'))).toBeLessThan(
-    100,
-  )
+  await expect(canvas).toHaveAttribute('data-map-objects', curatedCount!)
+  await expect(canvas).toHaveAttribute('data-catalog-ready', 'false')
   await expect(page.locator('.graphics-error')).toHaveCount(0)
   await page.unroute('**/data/stars.json')
   await page
@@ -1948,7 +2636,7 @@ test('continuous world zoom crosses astronomical scales without selecting anythi
   const generation = await canvas.getAttribute('data-map-generation')
   const selected = await canvas.getAttribute('data-scene')
   await page.mouse.move(680, 480)
-  for (let index = 0; index < 11; index++) await page.mouse.wheel(0, 1000)
+  for (let index = 0; index < 55; index++) await page.mouse.wheel(0, 1000)
   await expect
     .poll(async () =>
       Number(await canvas.getAttribute('data-world-distance-pc')),
@@ -1962,7 +2650,7 @@ test('continuous world zoom crosses astronomical scales without selecting anythi
   await page.screenshot({
     path: testInfo.outputPath('continuous-galactic-scale.png'),
   })
-  for (let index = 0; index < 8; index++) await page.mouse.wheel(0, -1000)
+  for (let index = 0; index < 40; index++) await page.mouse.wheel(0, -1000)
   await expect
     .poll(async () =>
       Number(await canvas.getAttribute('data-world-distance-pc')),
@@ -1992,7 +2680,7 @@ test('approaching a planet loads its surface without a selection or jump', async
     element.dispatchEvent(new Event('input', { bubbles: true }))
   })
   await expect(canvas).toHaveAttribute('data-flying', 'false')
-  for (let step = 0; step < 8; step++) {
+  for (let step = 0; step < 40; step++) {
     if (
       (await canvas.getAttribute('data-active-model-ids'))
         ?.split(',')
@@ -2009,7 +2697,7 @@ test('approaching a planet loads its surface without a selection or jump', async
     'data-active-model-ids',
     /(^|,)earth(,|$)/,
   )
-  for (let step = 0; step < 4; step++) await page.mouse.wheel(0, -700)
+  for (let step = 0; step < 14; step++) await page.mouse.wheel(0, -700)
   await expect(canvas).toHaveAttribute('data-flying', 'false')
   await expect(page.locator('.scene-heading h1')).toHaveText('Earth')
   await expect(page.locator('.object-identity h2')).toHaveText('Earth')
@@ -2138,6 +2826,288 @@ test('Hello World branding and fullscreen work on desktop and phone', async ({
   expect(errors).toEqual([])
 })
 
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`cosmic structures retain depth and sparse voids at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(180_000)
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(message.text())
+    })
+    await page.setViewportSize(viewport)
+    for (const id of ['universe', 'laniakea', 'virgo']) {
+      await page.goto(`./?object=${id}&view=object`)
+      const canvas = page.locator('.universe-canvas canvas')
+      await expect(canvas).toHaveAttribute('data-flying', 'false')
+      await page
+        .getByRole('button', { name: 'Pause simulation', exact: true })
+        .click()
+      await page.getByRole('button', { name: 'Hide UI', exact: true }).click()
+      if (id === 'universe') {
+        await expect(canvas).toHaveAttribute(
+          'data-cosmic-web-representation',
+          'curved-filaments-and-voids',
+        )
+        expect(
+          Number(await canvas.getAttribute('data-cosmic-web-voids')),
+        ).toBe(6)
+        expect(
+          Number(await canvas.getAttribute('data-cosmic-web-filaments')),
+        ).toBeGreaterThan(100)
+        expect(
+          Number(await canvas.getAttribute('data-cosmic-web-particles')),
+        ).toBeGreaterThan(10000)
+      }
+      if (id === 'laniakea') {
+        await expect(canvas).toHaveAttribute(
+          'data-laniakea-representation',
+          'catalog-anchored-filament-web',
+        )
+        expect(
+          Number(await canvas.getAttribute('data-laniakea-flow-curves')),
+        ).toBeGreaterThanOrEqual(80)
+        await expect(canvas).toHaveAttribute(
+          'data-structure-members',
+          'local-group,virgo,fornax-cluster,norma-cluster',
+        )
+      }
+      if (id === 'virgo')
+        await expect(canvas).toHaveAttribute(
+          'data-cluster-representation',
+          'concentrated-galaxies',
+        )
+      const overview = await canvasPixels(page)
+      expect(overview.bright, id).toBeGreaterThan(
+        viewport.width > 760 ? 100 : 25,
+      )
+      expect(
+        overview.clipped / Math.max(1, overview.bright),
+        id,
+      ).toBeLessThan(0.12)
+      await page.screenshot({
+        path: testInfo.outputPath(`${id}-${viewport.width}-overview.png`),
+      })
+      await page.mouse.move(viewport.width * 0.5, viewport.height * 0.45)
+      await page.mouse.down()
+      await page.mouse.move(viewport.width * 0.62, viewport.height * 0.52, {
+        steps: 6,
+      })
+      await page.mouse.up()
+      await expect
+        .poll(async () => (await canvasPixels(page)).checksum)
+        .not.toBe(overview.checksum)
+      const beforeZoom = Number(
+        await canvas.getAttribute('data-camera-distance'),
+      )
+      await page.getByRole('button', { name: 'Show UI', exact: true }).click()
+      await page.getByRole('button', { name: 'Zoom in', exact: true }).click()
+      await expect
+        .poll(async () =>
+          Number(await canvas.getAttribute('data-camera-distance')),
+        )
+        .toBeLessThan(beforeZoom * 0.95)
+    }
+    await page.goto('./?object=universe')
+    const mapped = page.locator('.universe-canvas canvas')
+    await expect(mapped).toHaveAttribute('data-flying', 'false')
+    await expect(mapped).toHaveAttribute(
+      'data-active-model-ids',
+      /(^|,)universe(,|$)/,
+    )
+    await expect(mapped).toHaveAttribute(
+      'data-cosmic-web-representation',
+      'curved-filaments-and-voids',
+    )
+    const mappedPixels = await canvasPixels(page)
+    expect(mappedPixels.bright).toBeGreaterThan(
+      viewport.width > 760 ? 100 : 25,
+    )
+    expect(
+      mappedPixels.clipped / Math.max(1, mappedPixels.bright),
+    ).toBeLessThan(0.12)
+    expect(
+      Number(await mapped.getAttribute('data-world-distance-pc')),
+    ).toBeGreaterThan(1e9)
+    await page.screenshot({
+      path: testInfo.outputPath(`cosmic-map-${viewport.width}.png`),
+    })
+    expect(errors).toEqual([])
+  })
+}
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`named galaxy groups and Laniakea flows stay navigable at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(180_000)
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(message.text())
+    })
+    await page.setViewportSize(viewport)
+    await page.goto('./?object=ngc-6769-group&view=object')
+    const canvas = page.locator('.universe-canvas canvas')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await expect(canvas).toHaveAttribute(
+      'data-group-representation',
+      'catalog-triplet-with-tidal-trails',
+    )
+    await expect(canvas).toHaveAttribute(
+      'data-structure-members',
+      'ngc-6769,ngc-6770,ngc-6771',
+    )
+    const group = await canvasPixels(page)
+    expect(group.bright).toBeGreaterThan(viewport.width > 760 ? 250 : 35)
+    expect(group.clipped / Math.max(1, group.bright)).toBeLessThan(0.08)
+    await page.screenshot({
+      path: testInfo.outputPath(`ngc-triplet-${viewport.width}.png`),
+    })
+    await page.getByRole('tab', { name: '3D map', exact: true }).click()
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    for (const id of ['ngc-6769', 'ngc-6770', 'ngc-6771'])
+      await expect(canvas).toHaveAttribute(
+        'data-active-model-ids',
+        new RegExp(`(^|,)${id}(,|$)`),
+      )
+    expect((await canvasPixels(page)).bright).toBeGreaterThan(
+      viewport.width > 760 ? 200 : 25,
+    )
+    await page.screenshot({
+      path: testInfo.outputPath(`ngc-triplet-map-${viewport.width}.png`),
+    })
+    await page.goto('./?object=laniakea')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await expect(canvas).toHaveAttribute(
+      'data-active-model-ids',
+      /(^|,)laniakea(,|$)/,
+    )
+    await expect(canvas).toHaveAttribute(
+      'data-laniakea-representation',
+      'catalog-anchored-filament-web',
+    )
+    await page
+      .getByRole('button', { name: 'Pause simulation', exact: true })
+      .click()
+    const paused = await canvasPixels(page)
+    const time = await canvas.getAttribute('data-visual-time')
+    expect((await canvasPixels(page)).checksum).toBe(paused.checksum)
+    await expect(canvas).toHaveAttribute('data-visual-time', time!)
+    await page
+      .getByRole('button', { name: 'Play simulation', exact: true })
+      .click()
+    await expect
+      .poll(async () => (await canvasPixels(page)).checksum)
+      .not.toBe(paused.checksum)
+    await page.screenshot({
+      path: testInfo.outputPath(`laniakea-map-${viewport.width}.png`),
+    })
+    if (viewport.width < 760)
+      await page
+        .getByRole('button', {
+          name: 'Show details for Laniakea',
+          exact: true,
+        })
+        .click()
+    await page
+      .getByRole('navigation', { name: 'Reference groups' })
+      .getByRole('button', { name: 'Norma Cluster', exact: true })
+      .click()
+    await expect(canvas).toHaveAttribute('data-scene', 'norma-cluster')
+    await page.goto('./?object=ngc-6769-group&view=object')
+    if (viewport.width < 760)
+      await page
+        .getByRole('button', {
+          name: 'Show details for NGC 6769 Group',
+          exact: true,
+        })
+        .click()
+    await page
+      .getByRole('navigation', { name: 'Group members' })
+      .getByRole('button', { name: 'NGC 6770', exact: true })
+      .click()
+    await expect(canvas).toHaveAttribute('data-scene', 'ngc-6770')
+    expect(errors).toEqual([])
+  })
+}
+
+for (const viewport of [
+  { width: 1440, height: 960 },
+  { width: 390, height: 844 },
+]) {
+  test(`TON 618 keeps its luminous disk and interactive lensing at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(120_000)
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(message.text())
+    })
+    await page.setViewportSize(viewport)
+    await page.goto('./?object=ton618&view=object')
+    const canvas = page.locator('.universe-canvas canvas')
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await expect(canvas).toHaveAttribute(
+      'data-quasar-appearance',
+      'cool-core-warm-disk',
+    )
+    await page
+      .getByRole('button', { name: 'Pause simulation', exact: true })
+      .click()
+    const still = await canvasPixels(page)
+    expect(still.bright).toBeGreaterThan(viewport.width > 760 ? 250 : 40)
+    expect(still.coolStars).toBeGreaterThan(10)
+    expect(still.warmStars).toBeGreaterThan(10)
+    expect(still.clipped / Math.max(1, still.bright)).toBeLessThan(0.12)
+    const time = await canvas.getAttribute('data-visual-time')
+    expect((await canvasPixels(page)).checksum).toBe(still.checksum)
+    await expect(canvas).toHaveAttribute('data-visual-time', time!)
+    await page.screenshot({
+      path: testInfo.outputPath(`ton618-${viewport.width}.png`),
+    })
+    await page
+      .getByRole('button', { name: 'Play simulation', exact: true })
+      .click()
+    await expect
+      .poll(async () => (await canvasPixels(page)).checksum)
+      .not.toBe(still.checksum)
+    await page
+      .getByRole('button', { name: 'Pause simulation', exact: true })
+      .click()
+    const distance = Number(await canvas.getAttribute('data-camera-distance'))
+    await page.getByRole('button', { name: 'Zoom in', exact: true }).click()
+    await expect
+      .poll(async () =>
+        Number(await canvas.getAttribute('data-camera-distance')),
+      )
+      .toBeLessThan(distance * 0.9)
+    await expect(canvas).toHaveAttribute('data-flying', 'false')
+    const beforeDrag = await canvasPixels(page)
+    await page.mouse.move(viewport.width * 0.48, viewport.height * 0.48)
+    await page.mouse.down()
+    await page.mouse.move(viewport.width * 0.57, viewport.height * 0.5, {
+      steps: 6,
+    })
+    await page.mouse.up()
+    await expect
+      .poll(async () => (await canvasPixels(page)).checksum)
+      .not.toBe(beforeDrag.checksum)
+    await page.screenshot({
+      path: testInfo.outputPath(`ton618-${viewport.width}-orbit.png`),
+    })
+    expect(errors).toEqual([])
+  })
+}
+
 test('galaxy reference style switches back to the original without changing the scene', async ({
   page,
 }, testInfo) => {
@@ -2174,7 +3144,9 @@ test('galaxy reference style switches back to the original without changing the 
   expect(reference.bright).toBeGreaterThan(original.bright * 1.15)
   expect(reference.coolStars).toBeGreaterThan(100)
   expect(reference.warmStars).toBeGreaterThan(original.warmStars)
-  expect(reference.colored / Math.max(1, reference.bright)).toBeGreaterThan(0.3)
+  expect(reference.colored / Math.max(1, reference.bright)).toBeGreaterThan(
+    0.3,
+  )
   expect(reference.clipped / Math.max(1, reference.bright)).toBeLessThan(0.08)
   await page.screenshot({ path: testInfo.outputPath('galaxy-reference.png') })
   await styles.getByRole('button', { name: 'Original', exact: true }).click()
@@ -2209,14 +3181,22 @@ for (const viewport of [
     await expect(canvas).toHaveAttribute('data-galaxy-style', 'reference')
     await expect(canvas).toHaveAttribute('data-galaxy-surface-layers', '0')
     await expect(canvas).toHaveAttribute('data-flying', 'false')
+    await expect(canvas).toHaveAttribute(
+      'data-galaxy-overview-blend',
+      '1.000',
+    )
     await page
       .getByRole('button', { name: 'Pause simulation', exact: true })
       .click()
     await page.getByRole('switch', { name: 'Labels', exact: true }).click()
     const overview = await canvasPixels(page)
     expect(overview.bright).toBeGreaterThan(viewport.width > 760 ? 1000 : 100)
-    expect(overview.warmStars).toBeGreaterThan(viewport.width > 760 ? 100 : 15)
-    expect(overview.coolStars).toBeGreaterThan(viewport.width > 760 ? 100 : 15)
+    expect(overview.warmStars).toBeGreaterThan(
+      viewport.width > 760 ? 100 : 15,
+    )
+    expect(overview.coolStars).toBeGreaterThan(
+      viewport.width > 760 ? 100 : 15,
+    )
     expect(overview.sharpDetail).toBeGreaterThan(
       viewport.width > 760 ? 250 : 30,
     )
@@ -2226,17 +3206,26 @@ for (const viewport of [
     })
     const horizontal = viewport.width > 760 ? 680 : 175
     const vertical = viewport.width > 760 ? 555 : 470
-    await page.mouse.move(horizontal, vertical)
-    await page.mouse.down()
-    await page.mouse.move(horizontal, vertical - viewport.height * 0.25, {
-      steps: 8,
-    })
-    await page.mouse.up()
-    await expect
-      .poll(async () =>
-        Number(await canvas.getAttribute('data-galaxy-inclination')),
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const angle = Number(
+        await canvas.getAttribute('data-galaxy-inclination'),
       )
-      .toBeGreaterThan(70)
+      if (angle > 75 && angle < 85) break
+      const movement =
+        Math.max(-0.06, Math.min(0.06, (80 - angle) / 198)) * viewport.height
+      await page.mouse.move(horizontal, vertical)
+      await page.mouse.down()
+      await page.mouse.move(horizontal, vertical - movement, { steps: 4 })
+      await page.mouse.up()
+      await expect(canvas).toHaveAttribute('data-render-quality', 'full', {
+        timeout: 30_000,
+      })
+    }
+    const inclination = Number(
+      await canvas.getAttribute('data-galaxy-inclination'),
+    )
+    expect(inclination).toBeGreaterThan(75)
+    expect(inclination).toBeLessThan(85)
     const edge = await canvasPixels(page)
     expect(edge.bright).toBeGreaterThan(viewport.width > 760 ? 1000 : 100)
     expect(edge.sharpDetail).toBeGreaterThan(viewport.width > 760 ? 250 : 30)
@@ -2268,7 +3257,10 @@ for (const viewport of [
       const canvas = page.locator('.universe-canvas canvas')
       await expect(canvas).toHaveAttribute('data-galaxy-style', 'reference')
       await expect(canvas).toHaveAttribute('data-following-id', 'milky-way')
-      await expect(canvas).toHaveAttribute('data-galaxy-texture-ready', 'true')
+      await expect(canvas).toHaveAttribute(
+        'data-galaxy-texture-ready',
+        'true',
+      )
       await expect(canvas).toHaveAttribute('data-flying', 'false')
       await page
         .getByRole('button', { name: 'Pause simulation', exact: true })
@@ -2291,10 +3283,18 @@ for (const viewport of [
       expect(pixels.bright).toBeGreaterThan(viewport.width > 760 ? 300 : 50)
       expect(pixels.clipped / Math.max(1, pixels.bright)).toBeLessThan(0.35)
       if (name === 'inside') {
+        await expect(canvas).toHaveAttribute(
+          'data-galaxy-overview-blend',
+          '0.000',
+        )
         expect(pixels.clipped / Math.max(1, pixels.bright)).toBeLessThan(0.08)
         expect(pixels.sharpDetail).toBeGreaterThan(
           viewport.width > 760 ? 250 : 30,
         )
+      } else {
+        expect(
+          Number(await canvas.getAttribute('data-galaxy-overview-blend')),
+        ).toBeGreaterThan(0.1)
       }
       await page.screenshot({
         path: testInfo.outputPath(`reference-${viewport.width}-${name}.png`),
@@ -2310,10 +3310,31 @@ for (const viewport of [
         name: 'Milky Way style',
         exact: true,
       })
+      const glints = page.getByRole('checkbox', {
+        name: 'Stellar glints',
+        exact: true,
+      })
+      await expect(glints).toBeChecked()
+      if (name === 'inside') {
+        const accented = await canvasPixels(page)
+        await glints.uncheck()
+        await expect(canvas).toHaveAttribute('data-galaxy-glints', 'disabled')
+        const plain = await canvasPixels(page)
+        expect(plain.checksum).not.toBe(accented.checksum)
+        await glints.check()
+        await expect(canvas).toHaveAttribute(
+          'data-galaxy-glints',
+          'selective-distance-faded',
+        )
+        await expect
+          .poll(async () => (await canvasPixels(page)).checksum)
+          .toBe(accented.checksum)
+      }
       await styles
         .getByRole('button', { name: 'Original', exact: true })
         .click()
       await expect(canvas).toHaveAttribute('data-galaxy-style', 'original')
+      await expect(glints).toBeDisabled()
       await styles
         .getByRole('button', { name: 'Reference', exact: true })
         .click()
@@ -2900,7 +3921,7 @@ for (const viewport of [
       (await canvas.getAttribute('data-solar-orbit-counts'))!,
     ) as Record<string, number>
     expect(counts.planet).toBe(8)
-    expect(counts.moon).toBe(7)
+    expect(counts.moon).toBe(9)
     expect(counts.spacecraft).toBe(3)
     expect(counts['dwarf-planet']).toBe(5)
     expect(counts.asteroid).toBeGreaterThan(4900)
@@ -2911,7 +3932,7 @@ for (const viewport of [
     })
     expect(
       Number(await canvas.getAttribute('data-orbit-draw-calls')),
-    ).toBeLessThanOrEqual(22)
+    ).toBeLessThanOrEqual(24)
     const generation = await canvas.getAttribute('data-map-generation')
     const target = await canvas.getAttribute('data-world-target')
     await page.getByRole('switch', { name: 'Labels', exact: true }).click()

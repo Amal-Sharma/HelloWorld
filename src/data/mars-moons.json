@@ -1,0 +1,37 @@
+{
+  "epoch": "2026-09-16 TDB",
+  "frame": "Mars-centered ICRF / J2000 ecliptic; AU and days",
+  "source": "https://ssd.jpl.nasa.gov/horizons/",
+  "phobos": {
+    "query": "https://ssd.jpl.nasa.gov/api/horizons.api?format=json&COMMAND=%27401%27&CENTER=%27500%40499%27&EPHEM_TYPE=%27ELEMENTS%27&START_TIME=%272026-09-16%27&STOP_TIME=%272026-09-17%27&STEP_SIZE=%271d%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&CSV_FORMAT=%27YES%27",
+    "periodDays": 0.3191389379302131,
+    "elements": {
+      "semiMajorAxis": 0.00006268941759243082,
+      "eccentricity": 0.01495997385736559,
+      "inclination": 25.68662292773998,
+      "ascendingNode": 82.0935129651723,
+      "perihelionArgument": 269.2300230349174,
+      "epoch": 2461299.5,
+      "meanAnomaly": 262.895591023786,
+      "perihelionTime": 2461299.586082772,
+      "perihelionDistance": 0.00006175158554411459,
+      "meanMotionDegreesPerDay": 1128.035338886545
+    }
+  },
+  "deimos": {
+    "query": "https://ssd.jpl.nasa.gov/api/horizons.api?format=json&COMMAND=%27402%27&CENTER=%27500%40499%27&EPHEM_TYPE=%27ELEMENTS%27&START_TIME=%272026-09-16%27&STOP_TIME=%272026-09-17%27&STEP_SIZE=%271d%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&CSV_FORMAT=%27YES%27",
+    "periodDays": 1.262527451398217,
+    "elements": {
+      "semiMajorAxis": 0.0001568080145611737,
+      "eccentricity": 0.0003127915994447,
+      "inclination": 24.12598133058196,
+      "ascendingNode": 81.49289957193167,
+      "perihelionArgument": 51.11237267539847,
+      "epoch": 2461299.5,
+      "meanAnomaly": 59.56873251885023,
+      "perihelionTime": 2461299.291091222,
+      "perihelionDistance": 0.0001567589663314933,
+      "meanMotionDegreesPerDay": 285.1423148077367
+    }
+  }
+}

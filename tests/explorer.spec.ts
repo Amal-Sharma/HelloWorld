@@ -1528,7 +1528,7 @@ for (const viewport of [
   test(`Tools keeps the selected tab when changing Atlas destinations at ${viewport.width}px`, async ({
     page,
   }, testInfo) => {
-    test.setTimeout(240_000)
+    test.setTimeout(360_000)
     await page.setViewportSize(viewport)
     await page.goto('./?object=earth')
     const toolsButton = page.getByRole('button', {

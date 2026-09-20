@@ -15,7 +15,7 @@ export default defineConfig({
     baseURL: previewUrl,
     viewport: { width: 1440, height: 960 },
     screenshot: 'only-on-failure',
-    trace: 'retain-on-failure',
+    trace: { mode: 'retain-on-failure', screenshots: false },
     launchOptions: { args: ['--enable-unsafe-swiftshader'] },
   },
   webServer: {

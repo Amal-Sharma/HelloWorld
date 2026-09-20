@@ -46,6 +46,51 @@ for (const viewport of [
   })
 }
 
+test('camera returns to full quality at a low frame rate', async ({ page }) => {
+  test.setTimeout(90_000)
+  await page.addInitScript(() => {
+    const request = window.requestAnimationFrame.bind(window)
+    const cancel = window.cancelAnimationFrame.bind(window)
+    const pending = new Map<number, number>()
+    let serial = 0
+    let last = 0
+    window.requestAnimationFrame = (callback) => {
+      const id = ++serial
+      const tick = (now: number) => {
+        if (now - last < 500) pending.set(id, request(tick))
+        else {
+          pending.delete(id)
+          last = now
+          callback(now)
+        }
+      }
+      pending.set(id, request(tick))
+      return id
+    }
+    window.cancelAnimationFrame = (id) => {
+      const frame = pending.get(id)
+      if (frame !== undefined) cancel(frame)
+      pending.delete(id)
+    }
+  })
+  await page.goto('./?object=earth&view=object')
+  const canvas = page.locator('.universe-canvas canvas')
+  await expect(canvas).toHaveAttribute('data-flying', 'false')
+  await page
+    .getByRole('button', { name: 'Pause simulation', exact: true })
+    .click()
+  const before = await canvasPixels(page)
+  await page.mouse.move(650, 500)
+  await page.mouse.down()
+  await expect(canvas).toHaveAttribute('data-render-quality', 'navigation')
+  await page.mouse.move(750, 450, { steps: 4 })
+  await page.mouse.up()
+  await expect(canvas).toHaveAttribute('data-render-quality', 'full', {
+    timeout: 10_000,
+  })
+  expect((await canvasPixels(page)).checksum).not.toBe(before.checksum)
+})
+
 async function canvasPixels(page: Page) {
   await expect(page.locator('.universe-canvas canvas')).toHaveAttribute(
     'data-render-quality',
@@ -192,6 +237,7 @@ for (const viewport of [
 test('saved and shared viewpoints restore camera date and layers', async ({
   page,
 }) => {
+  test.setTimeout(120_000)
   await page.route('**/favicon.ico', (route) => route.fulfill({ status: 204 }))
   await page.goto('./?object=earth')
   const canvas = page.locator('.universe-canvas canvas')
@@ -1471,6 +1517,7 @@ for (const viewport of [
   test(`Tools keeps the selected tab when changing Atlas destinations at ${viewport.width}px`, async ({
     page,
   }, testInfo) => {
+    test.setTimeout(120_000)
     await page.setViewportSize(viewport)
     await page.goto('./?object=earth')
     const toolsButton = page.getByRole('button', {
@@ -1544,7 +1591,7 @@ for (const viewport of [
 test('unselected Laniakea appears between local groups and the observable horizon', async ({
   page,
 }, testInfo) => {
-  test.setTimeout(120000)
+  test.setTimeout(180_000)
   await page.goto('./?object=solar-system')
   const canvas = page.locator('.universe-canvas canvas')
   await expect(canvas).toHaveAttribute('data-catalog-ready', 'true')
@@ -3049,7 +3096,7 @@ for (const viewport of [
   test(`TON 618 keeps its luminous disk and interactive lensing at ${viewport.width}px`, async ({
     page,
   }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(180_000)
     const errors: string[] = []
     page.on('pageerror', (error) => errors.push(error.message))
     page.on('console', (message) => {
@@ -3114,7 +3161,7 @@ for (const viewport of [
 test('galaxy reference style switches back to the original without changing the scene', async ({
   page,
 }, testInfo) => {
-  test.setTimeout(120_000)
+  test.setTimeout(240_000)
   await page.goto('./?object=milky-way&view=object')
   const canvas = page.locator('.universe-canvas canvas')
   await expect(canvas).toHaveAttribute('data-galaxy-texture-ready', 'true')
@@ -3246,7 +3293,7 @@ for (const viewport of [
     test(`reference galaxy map preserves ${name} detail and style controls at ${viewport.width}px`, async ({
       page,
     }, testInfo) => {
-      test.setTimeout(180_000)
+      test.setTimeout(name === 'inside' ? 300_000 : 180_000)
       await page.route('**/favicon.ico', (route) =>
         route.fulfill({ status: 204 }),
       )

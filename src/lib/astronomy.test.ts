@@ -46,6 +46,7 @@ import {
   formatLightTime,
   formatRulerDistance,
   referencePositionPc,
+  cameraDampingFactor,
   LANIAKEA_RADIUS_PC,
   OBSERVABLE_RADIUS_PC,
   mapWheelZoomFactor,
@@ -350,6 +351,20 @@ describe('shareable viewpoints', () => {
 })
 
 describe('continuous map coordinates', () => {
+  it('settles camera damping by elapsed time instead of frame count', () => {
+    const reference = Math.pow(1 - 0.065, 120)
+    for (const framesPerSecond of [2, 4, 10, 30, 60, 120]) {
+      const residual = Math.pow(
+        1 - cameraDampingFactor(1 / framesPerSecond),
+        framesPerSecond * 2,
+      )
+      expect(residual, `${framesPerSecond} fps`).toBeCloseTo(reference, 12)
+    }
+    expect(cameraDampingFactor(1 / 60)).toBeCloseTo(0.065, 12)
+    expect(cameraDampingFactor(NaN)).toBeCloseTo(0.065, 12)
+    expect(cameraDampingFactor(0)).toBeCloseTo(0.065, 12)
+    expect(cameraDampingFactor(30)).toBe(cameraDampingFactor(0.5))
+  })
   it('bounds wheel gestures and separates supercluster and horizon overview scales', () => {
     expect(mapWheelZoomFactor(1e9)).toBeLessThan(1.4)
     expect(mapWheelZoomFactor(-1e9)).toBeGreaterThan(0.7)

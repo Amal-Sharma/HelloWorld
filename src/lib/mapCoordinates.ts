@@ -19,6 +19,14 @@ export const MAX_MAP_DISTANCE_PC = OBSERVABLE_RADIUS_PC * 2.5
 export const LANIAKEA_RADIUS_PC = 80e6
 export const LIGHT_SPEED_KM_S = 299792.458
 
+export function cameraDampingFactor(elapsedSeconds: number) {
+  const elapsed =
+    Number.isFinite(elapsedSeconds) && elapsedSeconds > 0
+      ? Math.min(elapsedSeconds, 0.5)
+      : 1 / 60
+  return 1 - Math.pow(1 - 0.065, elapsed * 60)
+}
+
 export function mapWheelZoomFactor(deltaY: number, deltaMode = 0) {
   if (!Number.isFinite(deltaY)) return 1
   const units = deltaMode === 1 ? 16 : deltaMode === 2 ? 300 : 1

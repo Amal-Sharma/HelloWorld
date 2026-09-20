@@ -4,7 +4,7 @@ import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js'
 import { ContinuousMap } from './ContinuousMap'
 import type { CameraPose, Viewpoint } from '../lib/viewpoints'
 import { comparisonLayout } from '../lib/scienceTools'
-import { referencePositionPc } from '../lib/mapCoordinates'
+import { cameraDampingFactor, referencePositionPc } from '../lib/mapCoordinates'
 import { SpectralAppearance } from './spectralAppearance'
 import type { ObservationBand } from '../lib/spectrum'
 import { AU_PER_PARSEC, KM_PER_PARSEC, LANIAKEA_RADIUS_PC, mapWheelZoomFactor } from '../lib/mapCoordinates'
@@ -5036,6 +5036,7 @@ export class SpaceScene {
     const elapsed = Math.max(0, (now - (this.lastFrame || now)) / 1000)
     const delta = Math.min(elapsed, 0.05)
     this.lastFrame = now
+    this.controls.dampingFactor = cameraDampingFactor(elapsed)
     if (
       this.view === 'sky' &&
       Math.abs(this.timestamp - this.lastSkyTime) > 30000 &&

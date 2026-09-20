@@ -39,7 +39,7 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
       - name: Build and verify the deployed site
-        run: npm run test:e2e -- --fully-parallel --shard=${{ matrix.shard }}/8 --grep 'deployment assets|NASA Voyager|new deep-sky visuals|saved and shared viewpoints|science tools show|mission histories and detailed|lunar eclipse and Mercury|cosmic structures|galaxy reference style|named galaxy groups|TON 618 keeps|reference galaxy map preserves inside|void emits|white dwarfs render|spectrum modes|atlas planetary|cosmology diagrams|Mars regions|Tools keeps|unselected Laniakea|Laniakea filaments|radio exposure lifts'
+        run: npm run test:e2e -- --fully-parallel --shard=${{ matrix.shard }}/8 --grep 'deployment assets|NASA Voyager|new deep-sky visuals|saved and shared viewpoints|science tools show|mission histories and detailed|lunar eclipse and Mercury|cosmic structures|galaxy reference style|named galaxy groups|TON 618 keeps|reference galaxy map preserves inside|void emits|white dwarfs render|spectrum modes|atlas planetary|cosmology diagrams|Mars regions|Tools keeps|unselected Laniakea|Laniakea filaments|radio exposure lifts|camera returns to full quality'
       - name: Preserve failed browser diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

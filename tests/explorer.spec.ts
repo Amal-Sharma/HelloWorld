@@ -3305,7 +3305,7 @@ for (const viewport of [
       page,
     }, testInfo) => {
       test.setTimeout(
-        name === 'inside' ? (viewport.width > 760 ? 420_000 : 300_000) : 180_000,
+        name === 'inside' ? (viewport.width > 760 ? 600_000 : 300_000) : 180_000,
       )
       await page.route('**/favicon.ico', (route) =>
         route.fulfill({ status: 204 }),

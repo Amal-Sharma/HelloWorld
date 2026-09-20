@@ -17,6 +17,8 @@ Vite prints the local URL, normally http://127.0.0.1:5173. Catalog snapshots and
 
 In the repository's **Settings > Pages > Build and deployment**, set **Source** to **GitHub Actions**. Commit and push the deployment changes to `main`. The [deployment workflow](.github/workflows/deploy-pages.yml) installs dependencies, runs unit tests and lint, builds the app for the repository subdirectory, and verifies desktop/mobile rendering before publishing `dist`.
 
+Browser verification is split across eight single-worker jobs to keep software-rendered WebGL checks within the 25-minute job limit. All existing deployment checks are retained, and every shard must pass before deployment. Playwright's `--fully-parallel` flag enables test-level sharding within the single test file; each runner still uses one worker. Only shard 1 uploads the Pages artifact. Failed shards upload their screenshots and traces as `browser-failures-*` artifacts for seven days.
+
 The site URL is https://amal-sharma.github.io/HelloWorld/. Check the **Actions** tab for the deployment result. Later pushes to `main` redeploy automatically; **Run workflow** also allows a manual deployment.
 
 Do not publish the raw `main` branch root: its HTML references TypeScript source that browsers cannot run directly. Keep `dist` ignored by Git; the workflow uploads the generated build as a Pages artifact. No personal token is stored in the workflow. When pushing a workflow file with a fine-grained personal access token, GitHub requires **Workflows: Read and write** in addition to **Contents: Read and write** for this repository.

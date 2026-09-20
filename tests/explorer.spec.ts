@@ -901,6 +901,9 @@ for (const viewport of [
       await page.mouse.down()
       await page.mouse.move(horizontal + 70, vertical - 35, { steps: 4 })
       await page.mouse.up()
+      await expect(canvas).toHaveAttribute('data-render-quality', 'full', {
+        timeout: 45_000,
+      })
       await expect
         .poll(async () => (await canvasPixels(page)).checksum)
         .not.toBe(pixels.checksum)
